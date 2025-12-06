@@ -7,6 +7,7 @@ GeoAnalystBench/
 │
 ├─ LICENSE                                    # 开源协议声明
 ├─ README.md                                  # 项目文档，涵盖基准测试说明、任务清单及实践案例
+├─ PROJECT_GUIDE.md                           # 完整复现指南（本文档），详述项目架构、核心逻辑及实施流程
 ├─ requirements.txt                           # Python依赖包配置清单
 │
 ├─ case_study/                                # 实证研究材料
@@ -47,6 +48,8 @@ GeoAnalystBench/
 | Code | 对应任务的参考Python实现 |
 
 这些字段在后续的提示词构造和模型推理环节中都会被引用。
+
+*数据集另通过Task Categories1-3字段标注各任务的方法论归属，采用ESRI空间分析分类框架的六个维度：理解位置（U）、测量形态分布（M）、确定位置关联（DR）、寻找最优方案（F）、检测量化模式（DP）、空间插值预测（S）。每个任务可归入至多三个类别以反映其复合性质。*
 
 **任务概览**
 
@@ -213,8 +216,8 @@ ollama pull deepseek-r1
 
 ```python
 """
-工具函数库
-提供LLM API调用、文本解析和评估指标计算等核心功能
+GeoAnalystBench 工具函数库
+提供LLM接口统一封装、文本解析和评估指标计算
 """
 
 import re
@@ -226,45 +229,76 @@ from langchain_google_genai import GoogleGenerativeAI
 import ollama
 
 
-# ==================== 文本处理工具 ====================
+# ============================================================
+# 文本解析工具
+# ============================================================
 
 def extract_task_list(text):
-    """从文本中提取任务列表，过滤掉编号行"""
+    """从模型输出中提取任务列表，自动过滤掉纯数字编号行"""
     lines = [line.strip() for line in text.split("\n") if line.strip()]
-    return [line for line in lines if not re.match(r'^\d+\.', line)]
+    return [line for line in lines if not re.match(r'^\d+\.$', line)]
 
 
-def find_task_length(workflow_text):
-    """从工作流文本中提取最大步骤编号"""
-    max_number = 0
+def calculate_workflow_length(workflow_text):
+    """
+    从工作流文本中提取步骤数量
+    通过匹配"数字+句点"模式识别步骤编号，返回最大编号值
+    """
+    max_step = 0
     
     for line in workflow_text.split("\n"):
         i = 0
         while i < len(line):
             if line[i].isdigit():
-                # 检查是否为两位数
+                # 处理两位数编号
                 if i + 1 < len(line) and line[i + 1].isdigit():
                     if i + 2 < len(line) and line[i + 2] == '.':
-                        max_number = max(max_number, int(line[i:i+2]))
+                        max_step = max(max_step, int(line[i:i+2]))
                         i += 2
-                # 单位数且后跟句点
+                # 处理单位数编号
                 elif i + 1 < len(line) and line[i + 1] == '.':
                     num = int(line[i])
                     if num <= 10:  # 避免误识别其他数字
-                        max_number = max(max_number, num)
+                        max_step = max(max_step, num)
                     i += 1
                 else:
                     i += 1
             else:
                 i += 1
     
-    return max_number
+    return max_step
 
 
-# ==================== LLM API调用接口 ====================
+def calculate_length_mae(ground_truth_df, predictions_df):
+    """
+    计算工作流长度预测的平均绝对误差
+    
+    Args:
+        ground_truth_df: 包含专家标注的DataFrame，需包含'id'和'task_length'列
+        predictions_df: 包含模型预测的DataFrame，需包含'task_id'和'task_length'列
+    
+    Returns:
+        float: 平均绝对误差值
+    """
+    total_error = 0
+    count = 0
+    
+    for _, gt_row in ground_truth_df.iterrows():
+        task_predictions = predictions_df[predictions_df["task_id"] == gt_row["id"]]
+        
+        for _, pred_row in task_predictions.iterrows():
+            total_error += abs(pred_row["task_length"] - gt_row["task_length"])
+            count += 1
+    
+    return total_error / count if count > 0 else 0
+
+
+# ============================================================
+# LLM统一接口层
+# ============================================================
 
 def call_gpt(prompt, temperature=0.7, max_tokens=None, timeout=None):
-    """调用GPT模型"""
+    """调用OpenAI GPT系列模型"""
     llm = ChatOpenAI(
         model="gpt-4o-mini",
         temperature=temperature,
@@ -275,7 +309,7 @@ def call_gpt(prompt, temperature=0.7, max_tokens=None, timeout=None):
 
 
 def call_claude(prompt, temperature=0.7, max_tokens=None, timeout=None):
-    """调用Claude模型"""
+    """调用Anthropic Claude系列模型"""
     llm = ChatAnthropic(
         model="claude-3-5-sonnet-20241022",
         temperature=temperature,
@@ -286,7 +320,7 @@ def call_claude(prompt, temperature=0.7, max_tokens=None, timeout=None):
 
 
 def call_gemini(prompt, temperature=0.7, max_tokens=None, timeout=None):
-    """调用Gemini模型"""
+    """调用Google Gemini系列模型"""
     llm = GoogleGenerativeAI(
         model="gemini-1.5-flash",
         temperature=temperature,
@@ -297,7 +331,10 @@ def call_gemini(prompt, temperature=0.7, max_tokens=None, timeout=None):
 
 
 def call_ollama(prompt, model='deepseek-r1', temperature=0.7):
-    """调用本地Ollama模型，自动处理DeepSeek-R1的思维链标记"""
+    """
+    调用本地Ollama服务托管的模型
+    自动处理DeepSeek-R1的<think>标记，提取实际回答内容
+    """
     response = ollama.generate(
         model=model,
         options={"temperature": temperature},
@@ -306,32 +343,36 @@ def call_ollama(prompt, model='deepseek-r1', temperature=0.7):
     
     result = response['response']
     
-    # DeepSeek-R1模型会输出<think>...</think>标记，需要提取实际内容
+    # DeepSeek-R1会输出<think>推理过程</think>实际回答的格式
     if '</think>' in result:
-        return result.split("</think>")[1].strip()
+        return result.split("</think>", 1)[1].strip()
     
     return result
 
 
-# ==================== 批量推理调度 ====================
+# ============================================================
+# 批量推理调度
+# ============================================================
 
-def call_api(api_type, prompt_file, output_file, model, 
-             ollama_model='deepseek-r1', temperature=0.7):
+def batch_inference(task_type, prompt_csv, output_csv, model_config):
     """
-    批量调用LLM进行推理
+    批量执行模型推理任务
     
-    参数说明：
-        api_type: 'workflow'或'code'，指定任务类型
-        prompt_file: 提示词CSV文件路径
-        output_file: 响应结果输出路径
-        model: 'gpt4'/'claude'/'gemini'/'ollama'
-        ollama_model: 使用ollama时的具体模型名
-        temperature: 采样温度参数
+    Args:
+        task_type: 'workflow' 或 'code'
+        prompt_csv: 提示词文件路径
+        output_csv: 输出结果保存路径
+        model_config: 字典格式，包含以下键：
+            - 'provider': 'gpt'/'claude'/'gemini'/'ollama'
+            - 'model_name': 模型标识符（ollama专用）
+            - 'temperature': 采样温度
     """
-    prompts = pd.read_csv(prompt_file)
+    prompts_df = pd.read_csv(prompt_csv)
+    provider = model_config['provider']
+    temperature = model_config.get('temperature', 0.7)
     
     # 初始化输出文件
-    with open(output_file, "w", newline='', encoding='utf-8') as f:
+    with open(output_csv, "w", newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
             'task_id', 'response_id', 'prompt_type', 'response_type',
@@ -339,27 +380,31 @@ def call_api(api_type, prompt_file, output_file, model,
         ])
     
     # 逐个处理提示词
-    total = len(prompts)
-    for idx, row in prompts.iterrows():
+    total = len(prompts_df)
+    for idx, row in prompts_df.iterrows():
         if idx > 0:
-            print('\r' + ' ' * 60 + '\r', end='')
-        print(f'{idx + 1}/{total}', end='', flush=True)
+            print('\r' + ' ' * 80 + '\r', end='')
+        print(f'进度: {idx + 1}/{total} | 任务ID: {row["task_id"]}', end='', flush=True)
         
         prompt = row['prompt_content']
         
         # 每个提示词请求3次以评估稳定性
         responses = []
         for _ in range(3):
-            if model == 'gpt4':
+            if provider == 'gpt':
                 response = call_gpt(prompt, temperature)
-            elif model == 'claude':
+            elif provider == 'claude':
                 response = call_claude(prompt, temperature)
-            elif model == 'gemini':
+            elif provider == 'gemini':
                 response = call_gemini(prompt, temperature)
-            elif model == 'ollama':
-                response = call_ollama(prompt, ollama_model, temperature)
+            elif provider == 'ollama':
+                response = call_ollama(
+                    prompt, 
+                    model=model_config.get('model_name', 'deepseek-r1'),
+                    temperature=temperature
+                )
             else:
-                raise ValueError(f"不支持的模型类型：{model}")
+                raise ValueError(f"不支持的模型提供商: {provider}")
             
             responses.append(response)
         
@@ -374,52 +419,23 @@ def call_api(api_type, prompt_file, output_file, model,
             prompt_type = 'original'
         
         # 写入响应结果
-        with open(output_file, "a", newline='', encoding='utf-8') as f:
+        with open(output_csv, "a", newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             for i, response in enumerate(responses):
-                if api_type == 'workflow':
-                    task_length = find_task_length(response)
-                else:
-                    task_length = 'none'
+                task_length = calculate_workflow_length(response) if task_type == 'workflow' else 'none'
                 
                 writer.writerow([
                     row['task_id'],
-                    f"{row['task_id']}{api_type}{i}",
+                    f"{row['task_id']}{task_type}{i}",
                     prompt_type,
-                    api_type,
+                    task_type,
                     row['Arcpy'],
-                    model,
+                    provider,
                     response,
                     task_length
                 ])
     
     print()  # 换行
-
-
-# ==================== 评估指标计算 ====================
-
-def calculate_workflow_length_loss(annotations, responses):
-    """
-    计算工作流长度的平均绝对误差
-    
-    参数：
-        annotations: 包含专家标注的DataFrame
-        responses: 包含模型响应的DataFrame
-    
-    返回：
-        平均长度偏差值
-    """
-    total_loss = 0
-    
-    for _, annotation in annotations.iterrows():
-        task_responses = responses[responses["task_id"] == annotation["id"]]
-        
-        for _, response in task_responses.iterrows():
-            total_loss += abs(
-                response["task_length"] - annotation["task_length"]
-            )
-    
-    return total_loss / len(annotations)
 ```
 
 **2. `prompt_generation.py` - 提示词矩阵构建**
@@ -428,224 +444,260 @@ def calculate_workflow_length_loss(annotations, responses):
 
 ```python
 """
-提示词生成脚本
-用于从基准数据集生成用于工作流推导和代码实现的完整提示词集合
+GeoAnalystBench 提示词生成器
+基于任务数据集为50个地理分析任务生成不同配置的提示词组合
 """
 
 import pandas as pd
 import csv
 
 
-def add_line_breaks(long_string, char_limit=80):
-    """限制每行字符数为80"""
-    words = long_string.split()
-    new_string = ""
-    char_count = 0
+# ============================================================
+# 文本格式化工具
+# ============================================================
+
+def wrap_text(text, max_line_length=80):
+    """将长文本按词边界折行，每行不超过指定字符数"""
+    if not isinstance(text, str):
+        return str(text)
+    
+    words = text.split()
+    lines = []
+    current_line = []
+    current_length = 0
+    
     for word in words:
-        new_string += word + " "
-        char_count += len(word)
-        if char_count > char_limit:
-            new_string += "\n"
-            char_count = 0
-    return new_string
-
-
-def long_line_break(long_string):
-    """处理过长字符串，对每行进行换行处理"""
-    result = ""
-    if isinstance(long_string, str):
-        for line in long_string.split("\n"):
-            new_line = add_line_breaks(line)
-            result += new_line + "\n"
-    else:
-        result = str(long_string)
-    return result
-
-
-def workflow_template(IDs=None, tasks=None, instructions=None, zeroShot=False, 
-                     domainKnowledges=None, datasets=None):
-    """生成工作流推导的提示词模板"""
-    if tasks is None and instructions is None:
-        print("Task or Instruction is necessary")
-        return None
+        word_length = len(word) + 1  # 加上空格
+        if current_length + word_length > max_line_length and current_line:
+            lines.append(' '.join(current_line))
+            current_line = [word]
+            current_length = word_length
+        else:
+            current_line.append(word)
+            current_length += word_length
     
-    prompt = {
-        "Task": tasks,
-        "Instruction": instructions,
-        "Domain Knowledge": domainKnowledges,
-        "Dataset Description": datasets
+    if current_line:
+        lines.append(' '.join(current_line))
+    
+    return '\n'.join(lines)
+
+
+def format_multiline_text(text):
+    """对多行文本的每一行进行折行处理"""
+    if not isinstance(text, str):
+        return str(text)
+    
+    formatted_lines = [wrap_text(line) for line in text.split('\n')]
+    return '\n'.join(formatted_lines)
+
+
+# ============================================================
+# 提示词模板构建
+# ============================================================
+
+def build_workflow_prompt(task, instruction, domain_knowledge=None, dataset_desc=None, 
+                         include_example=True):
+    """
+    构建工作流生成任务的提示词
+    
+    Args:
+        task: 任务简要描述
+        instruction: 详细指令
+        domain_knowledge: 可选的领域知识说明
+        dataset_desc: 可选的数据集描述
+        include_example: 是否包含输出示例
+    """
+    sections = {
+        "Task": task,
+        "Instruction": instruction,
     }
-
-    template = """As a Geospatial data scientist, you will generate a workflow to a proposed task.\n"""
     
-    for key, value in prompt.items():
-        if value is not None:
-            template += f"\n[{key}]: \n{value}"
-
-    sample = """ \n\"\"\"
-  tasks = ["task1", "task2", "task3"]
-
-  G = nx.DiGraph()
-  for i in range(len(tasks) - 1):
-      G.add_edge(tasks[i], tasks[i + 1])
-  pos = nx.drawing.nx_pydot.graphviz_layout(G, prog="dot")
-  plt.figure(figsize=(15, 8))
-  nx.draw(G, pos, with_labels=True, node_size=3000, node_color='lightblue', font_size=10, font_weight='bold', arrowsize=20)
-  plt.title("Workflow for Analyzing Urban Heat Using Kriging Interpolation", fontsize=14)
-  plt.show()\n\"\"\"
-  """
-
-    template += '\n[Key Notes]:'
-    template += '\n1.Use **automatic reasoning** and clearly explain each step (Chain of Thoughts approach).'
-    template += '\n2.Using **NetworkX* package for visualization.'
-    template += '\n3.Using \'dot\' for graph visualization layout.'
-    template += '\n4.Multiple subtasks can be proceeded correspondingly because'
-    template += '\nall of their outputs will be inputs for the next subtask.'
-    template += "\n5.Limiting your output to code, no extra information."
-    template += '\n6.Only codes for workflow, no implementation.'
-    template += '\n'
+    if domain_knowledge:
+        sections["Domain Knowledge"] = domain_knowledge
+    if dataset_desc:
+        sections["Dataset Description"] = dataset_desc
     
-    if zeroShot is False:
-        template += "\n[Expected Sample Output Begin]"
-        template += "\n" + sample
-        template += "[Expected Sample Output End]"
+    prompt = "As a Geospatial data scientist, you will generate a workflow to a proposed task.\n"
     
-    return template
+    for key, value in sections.items():
+        prompt += f"\n[{key}]:\n{value}\n"
+    
+    prompt += "\n[Key Notes]:"
+    prompt += "\n1. Use **automatic reasoning** and clearly explain each step (Chain of Thoughts approach)."
+    prompt += "\n2. Using **NetworkX** package for visualization."
+    prompt += "\n3. Using 'dot' for graph visualization layout."
+    prompt += "\n4. Multiple subtasks can be proceeded correspondingly because all of their outputs will be inputs for the next subtask."
+    prompt += "\n5. Limiting your output to code, no extra information."
+    prompt += "\n6. Only codes for workflow, no implementation.\n"
+    
+    if include_example:
+        example = '''
+"""
+tasks = ["task1", "task2", "task3"]
+
+G = nx.DiGraph()
+for i in range(len(tasks) - 1):
+    G.add_edge(tasks[i], tasks[i + 1])
+pos = nx.drawing.nx_pydot.graphviz_layout(G, prog="dot")
+plt.figure(figsize=(15, 8))
+nx.draw(G, pos, with_labels=True, node_size=3000, node_color='lightblue', 
+        font_size=10, font_weight='bold', arrowsize=20)
+plt.title("Workflow for Analyzing Urban Heat Using Kriging Interpolation", fontsize=14)
+plt.show()
+"""
+'''
+        prompt += "\n[Expected Sample Output Begin]"
+        prompt += example
+        prompt += "\n[Expected Sample Output End]"
+    
+    return prompt
 
 
-def code_template(IDs=None, tasks=None, instructions=None, zeroShot=False, 
-                 domainKnowledges=None, datasets=None, Arcpy=False):
-    """生成代码实现的提示词模板"""
-    if tasks is None and instructions is None:
-        print("Task or Instruction is necessary")
-        return None
+def build_code_prompt(task, instruction, use_arcpy, domain_knowledge=None, 
+                     dataset_desc=None, include_example=True):
+    """
+    构建代码实现任务的提示词
     
-    prompt = {
-        "Task": tasks,
-        "Instruction": instructions,
-        "Domain Knowledge": domainKnowledges,
-        "Dataset Description": datasets
+    Args:
+        task: 任务简要描述
+        instruction: 详细指令
+        use_arcpy: 是否使用ArcPy库
+        domain_knowledge: 可选的领域知识说明
+        dataset_desc: 可选的数据集描述
+        include_example: 是否包含输出示例
+    """
+    sections = {
+        "Task": task,
+        "Instruction": instruction,
     }
-
-    template = """As a Geospatial data scientist, generate a python file to solve the proposed task.\n"""
     
-    for key, value in prompt.items():
-        if value is not None:
-            template += f"\n[{key}]: \n{value}"
-
-    sample = """ \"\"\"
-    import packages
-
-    def main():
-      path = "path"
-      data = loaddata()
-      #code for subtask1
-      #code for subtask2
-      #code for final task
-
-    if __name__ == "__main__":
-      main()
-  \"\"\"
-  """
+    if domain_knowledge:
+        sections["Domain Knowledge"] = domain_knowledge
+    if dataset_desc:
+        sections["Dataset Description"] = dataset_desc
     
-    template += '\n\n[Key Notes]:'
-    template += '\n1.Use **automatic reasoning** and clearly explain each subtask before performing it (ReAct approach).'
-    template += '\n2.Using latest python packages for code generation'
-    template += "\n3.Put all code under main function, no helper functions"
-    template += "\n4.Limit your output to code, no extra information."
+    prompt = "As a Geospatial data scientist, generate a python file to solve the proposed task.\n"
     
-    if Arcpy is True:
-        template += "\n5.Use latest **Arcpy** functions only"
+    for key, value in sections.items():
+        prompt += f"\n[{key}]:\n{value}\n"
+    
+    prompt += "\n[Key Notes]:"
+    prompt += "\n1. Use **automatic reasoning** and clearly explain each subtask before performing it (ReAct approach)."
+    prompt += "\n2. Using latest python packages for code generation."
+    prompt += "\n3. Put all code under main function, no helper functions."
+    prompt += "\n4. Limit your output to code, no extra information."
+    
+    if use_arcpy:
+        prompt += "\n5. Use latest **Arcpy** functions only."
     else:
-        template += "\n5.Use latest open source python packages only"
+        prompt += "\n5. Use latest open source python packages only."
     
-    template += '\n'
+    prompt += "\n"
     
-    if zeroShot is False:
-        template += "\n[Expected Sample Output Begin]"
-        template += "\n" + sample
-        template += "[Expected Sample Output End]"
+    if include_example:
+        example = '''
+"""
+import packages
+
+def main():
+    path = "path"
+    data = loaddata()
+    # code for subtask1
+    # code for subtask2
+    # code for final task
+
+if __name__ == "__main__":
+    main()
+"""
+'''
+        prompt += "\n[Expected Sample Output Begin]"
+        prompt += example
+        prompt += "\n[Expected Sample Output End]"
     
-    return template
+    return prompt
 
 
-def generate_prompts(dataset_path='dataset/GeoAnalystBench.csv', 
-                    code_output='codes/code_prompts.csv',
-                    workflow_output='codes/workflow_prompts.csv'):
-    """主函数：为50个任务生成所有提示词组合"""
+# ============================================================
+# 主生成流程
+# ============================================================
+
+def generate_all_prompts(dataset_path='dataset/GeoAnalystBench.csv',
+                        code_output='codes/code_prompts.csv',
+                        workflow_output='codes/workflow_prompts.csv'):
+    """为所有任务生成完整的提示词矩阵"""
     
-    data = pd.read_csv(dataset_path)
+    tasks_df = pd.read_csv(dataset_path)
+    
+    # 初始化输出文件
+    header = ['task_id', 'type', 'domain_knowledge', 'dataset', 'Arcpy', 'prompt_content']
     
     with open(code_output, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['task_id', 'type', 'domain_knowledge', 'dataset', 'Arcpy', 'prompt_content'])
-
+        csv.writer(f).writerow(header)
+    
     with open(workflow_output, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['task_id', 'type', 'domain_knowledge', 'dataset', 'Arcpy', 'prompt_content'])
-
-    for id in range(50):
-        row = data.iloc[id]
-        task = row["Task"]
-        instruction = row["Instruction"]
-        domainKnowledge = row["Domain Knowledge"]
-        dataset = row["Dataset Description"]
-        Arcpy = row["Open Source"] != 'T'
-
-        instruction = add_line_breaks(instruction)
-        task = add_line_breaks(task)
-        domainKnowledge = add_line_breaks(domainKnowledge)
-        dataset = long_line_break(dataset)
-
-        combinations = [
+        csv.writer(f).writerow(header)
+    
+    # 为每个任务生成四种配置的提示词
+    for idx, row in tasks_df.iterrows():
+        task_id = idx + 1
+        task = wrap_text(row["Task"])
+        instruction = wrap_text(row["Instruction"])
+        domain_knowledge = wrap_text(row["Domain Knowledge"])
+        dataset_desc = format_multiline_text(row["Dataset Description"])
+        use_arcpy = row["Open Source"] != 'T'
+        
+        # 四种配置组合：(包含领域知识, 包含数据集描述)
+        configs = [
             (False, False),
             (True, False),
             (False, True),
             (True, True)
         ]
-
-        for domain, dataset_included in combinations:
-            code_params = {
-                'tasks': task,
-                'instructions': instruction,
-                'zeroShot': True,
-                'Arcpy': Arcpy
-            }
-
-            workflow_params = {
-                'tasks': task,
-                'instructions': instruction,
-                'zeroShot': False
-            }
-
-            if domain:
-                code_params['domainKnowledges'] = domainKnowledge
-                workflow_params['domainKnowledges'] = domainKnowledge
-            if dataset_included:
-                code_params['datasets'] = dataset
-                workflow_params['datasets'] = dataset
-
-            code_prompt = code_template(**code_params)
-            workflow_prompt = workflow_template(**workflow_params)
-
-            with open(code_output, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([id+1, 'code', domain, dataset_included, Arcpy, code_prompt])
-            
-            with open(workflow_output, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([id+1, 'workflow', domain, dataset_included, Arcpy, workflow_prompt])
         
-        print(f"已生成任务 {id+1}/50 的提示词")
-
-    print("提示词生成完成！")
-    print(f"代码提示词已保存至：{code_output}")
-    print(f"工作流提示词已保存至：{workflow_output}")
+        for include_domain, include_dataset in configs:
+            code_prompt = build_code_prompt(
+                task=task,
+                instruction=instruction,
+                use_arcpy=use_arcpy,
+                domain_knowledge=domain_knowledge if include_domain else None,
+                dataset_desc=dataset_desc if include_dataset else None,
+                include_example=True
+            )
+            
+            workflow_prompt = build_workflow_prompt(
+                task=task,
+                instruction=instruction,
+                domain_knowledge=domain_knowledge if include_domain else None,
+                dataset_desc=dataset_desc if include_dataset else None,
+                include_example=True
+            )
+            
+            # 写入代码提示词
+            with open(code_output, 'a', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow([
+                    task_id, 'code', include_domain, include_dataset, 
+                    use_arcpy, code_prompt
+                ])
+            
+            # 写入工作流提示词
+            with open(workflow_output, 'a', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow([
+                    task_id, 'workflow', include_domain, include_dataset, 
+                    use_arcpy, workflow_prompt
+                ])
+        
+        print(f"已生成任务 {task_id}/50 的提示词")
+    
+    print("\n提示词生成完成！")
+    print(f"代码提示词: {code_output}")
+    print(f"工作流提示词: {workflow_output}")
 
 
 if __name__ == "__main__":
-    generate_prompts()
+    generate_all_prompts()
 ```
+
+值得一提的是，若需在正式执行前快速验证流程可行性，可临时调整任务处理范围。在`generate_all_prompts`函数中定位到遍历数据集的循环语句`for idx, row in tasks_df.iterrows():`，将其改为`for idx, row in tasks_df.head(5).iterrows():`即可将处理对象限定为前5个任务。这样生成的提示词文件仅包含20条记录，对应的推理时长可缩短至30分钟到2小时，便于在短时间内确认整套系统能否正常运转。待测试通过后恢复原始代码，重新生成完整的提示词集合并启动全量推理即可。
 
 **3. `Inference.py` - 模型推理调度中枢**
 
@@ -655,153 +707,117 @@ if __name__ == "__main__":
 
 ```python
 """
-模型推理脚本
-批量调用LLM完成工作流设计和代码编写任务
-当前配置：优先使用本地ollama模型
+GeoAnalystBench 模型推理调度器
+批量调用不同LLM完成工作流设计和代码生成任务
 """
 
 import os
-from utils import call_api
-
-# ==================== API密钥配置 ====================
-# 如需使用商业模型，请取消注释并填入对应API密钥
-
-# OPENAI_API_KEY = "your_openai_key_here"
-# CLAUDE_API_KEY = "your_claude_key_here"
-# GEMINI_API_KEY = "your_gemini_key_here"
-
-# os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
-# os.environ["ANTHROPIC_API_KEY"] = CLAUDE_API_KEY
-# os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
+from utils import batch_inference
 
 
-# ==================== Ollama本地模型推理 ====================
-def run_ollama_inference(model_name='deepseek-r1', temperature=0.7):
-    """使用本地ollama模型进行推理"""
-    print(f"\n开始使用Ollama模型进行推理：{model_name}")
-    print("=" * 60)
+# ============================================================
+# API密钥配置（商业模型需要）
+# ============================================================
+
+# 使用商业模型时，请取消注释并填入有效密钥
+# os.environ["OPENAI_API_KEY"] = "your_openai_key_here"
+# os.environ["ANTHROPIC_API_KEY"] = "your_claude_key_here"
+# os.environ["GOOGLE_API_KEY"] = "your_gemini_key_here"
+
+
+# ============================================================
+# 模型配置
+# ============================================================
+
+MODELS = {
+    'ollama_deepseek': {
+        'provider': 'ollama',
+        'model_name': 'deepseek-r1',
+        'temperature': 0.7,
+        'output_suffix': 'ollama_deepseek-r1'
+    },
+    'gpt4': {
+        'provider': 'gpt',
+        'temperature': 0.7,
+        'output_suffix': 'gpt4'
+    },
+    'claude': {
+        'provider': 'claude',
+        'temperature': 0.7,
+        'output_suffix': 'claude'
+    },
+    'gemini': {
+        'provider': 'gemini',
+        'temperature': 0.7,
+        'output_suffix': 'gemini'
+    },
+}
+
+
+# ============================================================
+# 推理执行函数
+# ============================================================
+
+def run_inference_for_model(model_key, run_code=True, run_workflow=True):
+    """
+    为指定模型执行推理任务
     
-    print("\n[1/2] 执行代码生成任务...")
-    call_api(
-        api_type='code',
-        prompt_file='codes/code_prompts.csv',
-        output_file=f'codes/code_responses_ollama_{model_name.replace(":", "_")}.csv',
-        model='ollama',
-        ollama_model=model_name,
-        temperature=temperature
-    )
+    Args:
+        model_key: MODELS字典中的模型标识
+        run_code: 是否执行代码生成任务
+        run_workflow: 是否执行工作流生成任务
+    """
+    if model_key not in MODELS:
+        raise ValueError(f"未知的模型配置: {model_key}")
     
-    print("\n[2/2] 执行工作流生成任务...")
-    call_api(
-        api_type='workflow',
-        prompt_file='codes/workflow_prompts.csv',
-        output_file=f'codes/workflow_responses_ollama_{model_name.replace(":", "_")}.csv',
-        model='ollama',
-        ollama_model=model_name,
-        temperature=temperature
-    )
+    config = MODELS[model_key]
+    output_suffix = config['output_suffix']
     
-    print("\n" + "=" * 60)
-    print("Ollama推理完成！")
+    print(f"\n{'='*60}")
+    print(f"开始使用 {model_key} 进行推理")
+    print(f"{'='*60}")
+    
+    if run_code:
+        print(f"\n[1/2] 执行代码生成任务...")
+        batch_inference(
+            task_type='code',
+            prompt_csv='codes/code_prompts.csv',
+            output_csv=f'codes/code_responses_{output_suffix}.csv',
+            model_config=config
+        )
+    
+    if run_workflow:
+        print(f"\n[2/2] 执行工作流生成任务...")
+        batch_inference(
+            task_type='workflow',
+            prompt_csv='codes/workflow_prompts.csv',
+            output_csv=f'codes/workflow_responses_{output_suffix}.csv',
+            model_config=config
+        )
+    
+    print(f"\n{model_key} 推理完成！")
+    print(f"{'='*60}\n")
 
 
-# ==================== 商业模型推理（暂时注释） ====================
-"""
-def run_gpt_inference(temperature=0.7):
-    使用GPT模型进行推理
-    print("\n开始使用GPT-4模型进行推理...")
-    print("=" * 60)
-    
-    print("\n[1/2] 执行代码生成任务...")
-    call_api(
-        api_type='code',
-        prompt_file='codes/code_prompts.csv',
-        output_file='codes/code_responses_gpt.csv',
-        model='gpt4',
-        temperature=temperature
-    )
-    
-    print("\n[2/2] 执行工作流生成任务...")
-    call_api(
-        api_type='workflow',
-        prompt_file='codes/workflow_prompts.csv',
-        output_file='codes/workflow_responses_gpt.csv',
-        model='gpt4',
-        temperature=temperature
-    )
-    
-    print("\n" + "=" * 60)
-    print("GPT推理完成！")
+# ============================================================
+# 主执行流程
+# ============================================================
 
-
-def run_claude_inference(temperature=0.7):
-    使用Claude模型进行推理
-    print("\n开始使用Claude模型进行推理...")
-    print("=" * 60)
-    
-    print("\n[1/2] 执行代码生成任务...")
-    call_api(
-        api_type='code',
-        prompt_file='codes/code_prompts.csv',
-        output_file='codes/code_responses_claude.csv',
-        model='claude',
-        temperature=temperature
-    )
-    
-    print("\n[2/2] 执行工作流生成任务...")
-    call_api(
-        api_type='workflow',
-        prompt_file='codes/workflow_prompts.csv',
-        output_file='codes/workflow_responses_claude.csv',
-        model='claude',
-        temperature=temperature
-    )
-    
-    print("\n" + "=" * 60)
-    print("Claude推理完成！")
-
-
-def run_gemini_inference(temperature=0.7):
-    使用Gemini模型进行推理
-    print("\n开始使用Gemini模型进行推理...")
-    print("=" * 60)
-    
-    print("\n[1/2] 执行代码生成任务...")
-    call_api(
-        api_type='code',
-        prompt_file='codes/code_prompts.csv',
-        output_file='codes/code_responses_gemini.csv',
-        model='gemini',
-        temperature=temperature
-    )
-    
-    print("\n[2/2] 执行工作流生成任务...")
-    call_api(
-        api_type='workflow',
-        prompt_file='codes/workflow_prompts.csv',
-        output_file='codes/workflow_responses_gemini.csv',
-        model='gemini',
-        temperature=temperature
-    )
-    
-    print("\n" + "=" * 60)
-    print("Gemini推理完成！")
-"""
-
-
-# ==================== 主函数 ====================
 def main():
-    """主执行流程"""
+    """
+    主执行入口
+    默认使用本地Ollama模型，如需测试其他模型请修改此处
+    """
     print("GeoAnalystBench 模型推理系统")
-    print("=" * 60)
+    print(f"{'='*60}")
     
     # 当前配置：仅使用本地Ollama模型
-    run_ollama_inference(model_name='deepseek-r1', temperature=0.7)
+    run_inference_for_model('ollama_deepseek')
     
-    # 如需使用其他模型，请取消下方注释并配置对应API密钥
-    # run_gpt_inference(temperature=0.7)
-    # run_claude_inference(temperature=0.7)
-    # run_gemini_inference(temperature=0.7)
+    # 使用其他模型的示例（需先配置API密钥）：
+    # run_inference_for_model('gpt4')
+    # run_inference_for_model('claude')
+    # run_inference_for_model('gemini')
     
     print("\n所有推理任务执行完毕！")
 
@@ -880,9 +896,11 @@ Ollama采用客户端-服务器分离设计，本质上是一套完整的本地L
 
 **安装配置流程**
 
-各操作系统的安装方式存在差异。macOS与Linux环境可执行官方提供的一键安装脚本，Windows平台则需下载对应的exe安装程序。完成安装后，通过`ollama pull`指令获取目标模型，相关文件会直接下载至默认存储路径。
+各操作系统的安装方式存在差异。macOS与Linux环境可执行官方提供的一键安装脚本，Windows平台则需下载对应的exe安装程序。针对Windows用户，若希望调整程序主体的落盘位置，可在命令行界面通过附加`/DIR`参数的方式实现，例如`.\OllamaSetup.exe /DIR="D:\Ollama"`，从而将接近5GB的核心组件置于非系统分区。完成安装后，通过`ollama pull`指令拉取相应模型，关联文件会自动保存至默认存储路径。
 
-模型文件的存放位置遵循系统约定：Windows环境下位于`C:\Users\<用户名>\.ollama\models`，Linux系统通常为`~/.ollama/models`。由于大型模型占用空间可观，建议通过设置`OLLAMA_MODELS`环境变量将存储目录迁移至数据盘，避免系统分区容量告急。
+模型文件的存放位置遵循系统约定：Windows环境下位于`C:\Users\<用户名>\.ollama\models`，Linux系统通常为`~/.ollama/models`。由于大型模型占用空间可观，需要调整该路径以避免系统分区容量告急。Windows版本较新的Ollama在图形界面中提供了"Model location"选项，可直接浏览并选定目标文件夹，该方式在当前版本中优先级更高。传统的`OLLAMA_MODELS`环境变量方案在部分场景下可能不被采纳，但仍可作为辅助手段保留。
+
+Windows环境下若搭载NVIDIA显卡，需确保GPU加速机制正常启用。通过新建系统环境变量`OLLAMA_GPU_LAYER`并赋值为`cuda`，同时设置`CUDA_VISIBLE_DEVICES`来选定具体设备（多GPU情况下按`nvidia-smi`输出的编号填写，通常为`0`），即可令模型优先加载至显存而非占用大量内存空间。配置生效需重启Ollama服务，可借助任务管理器或`nvidia-smi`工具验证显存使用情况。
 
 **量化策略与资源需求**
 
@@ -921,7 +939,7 @@ def call_ollama(prompt, model='deepseek-r1', temperature=0.7):
     )
     result = response['response']
     if '</think>' in result:
-        return result.split("</think>")[1].strip()
+        return result.split("</think>", 1)[1].strip()
     return result
 ```
 
