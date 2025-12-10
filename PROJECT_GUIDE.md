@@ -201,10 +201,10 @@ pip install -r requirements.txt
 若选择本地部署路线，需额外配置`ollama`服务并拉取目标模型：
 
 ```bash
-ollama pull deepseek-r1
+ollama pull deepseek-r1:7b
 ```
 
-键入上述指令会自动获取`deepseek-r1`的最新版本（等同于显式指定`:latest`标签），通常为7B参数规模的Q4_K_M量化模型。
+此处明确指定7B参数规模的Q4_K_M量化版本，以对齐原论文评估实验的配置基准。Ollama平台的`:latest`当前指向8.2B参数变体，两个规格在资源消耗与运行效率上有所不同，命令中附加具体后缀可保障复现环境与研究原型的对应关系。
 
 **项目核心代码文件**
 
@@ -330,7 +330,7 @@ def call_gemini(prompt, temperature=0.7, max_tokens=None, timeout=None):
     return llm.invoke(prompt)
 
 
-def call_ollama(prompt, model='deepseek-r1', temperature=0.7):
+def call_ollama(prompt, model='deepseek-r1:7b', temperature=0.7):
     """
     调用本地Ollama服务托管的模型
     自动处理DeepSeek-R1的<think>标记，提取实际回答内容
@@ -399,8 +399,8 @@ def batch_inference(task_type, prompt_csv, output_csv, model_config):
                 response = call_gemini(prompt, temperature)
             elif provider == 'ollama':
                 response = call_ollama(
-                    prompt, 
-                    model=model_config.get('model_name', 'deepseek-r1'),
+                    prompt,
+                    model=model_config.get('model_name', 'deepseek-r1:7b'),
                     temperature=temperature
                 )
             else:
@@ -495,7 +495,7 @@ def format_multiline_text(text):
 # 提示词模板构建
 # ============================================================
 
-def build_workflow_prompt(task, instruction, domain_knowledge=None, dataset_desc=None, 
+def build_workflow_prompt(task, instruction, domain_knowledge=None, dataset_desc=None,
                          include_example=True):
     """
     构建工作流生成任务的提示词
@@ -540,7 +540,7 @@ for i in range(len(tasks) - 1):
     G.add_edge(tasks[i], tasks[i + 1])
 pos = nx.drawing.nx_pydot.graphviz_layout(G, prog="dot")
 plt.figure(figsize=(15, 8))
-nx.draw(G, pos, with_labels=True, node_size=3000, node_color='lightblue', 
+nx.draw(G, pos, with_labels=True, node_size=3000, node_color='lightblue',
         font_size=10, font_weight='bold', arrowsize=20)
 plt.title("Workflow for Analyzing Urban Heat Using Kriging Interpolation", fontsize=14)
 plt.show()
@@ -553,7 +553,7 @@ plt.show()
     return prompt
 
 
-def build_code_prompt(task, instruction, use_arcpy, domain_knowledge=None, 
+def build_code_prompt(task, instruction, use_arcpy, domain_knowledge=None,
                      dataset_desc=None, include_example=True):
     """
     构建代码实现任务的提示词
@@ -675,14 +675,14 @@ def generate_all_prompts(dataset_path='dataset/GeoAnalystBench.csv',
             # 写入代码提示词
             with open(code_output, 'a', newline='', encoding='utf-8') as f:
                 csv.writer(f).writerow([
-                    task_id, 'code', include_domain, include_dataset, 
+                    task_id, 'code', include_domain, include_dataset,
                     use_arcpy, code_prompt
                 ])
             
             # 写入工作流提示词
             with open(workflow_output, 'a', newline='', encoding='utf-8') as f:
                 csv.writer(f).writerow([
-                    task_id, 'workflow', include_domain, include_dataset, 
+                    task_id, 'workflow', include_domain, include_dataset,
                     use_arcpy, workflow_prompt
                 ])
         
@@ -732,9 +732,9 @@ from utils import batch_inference
 MODELS = {
     'ollama_deepseek': {
         'provider': 'ollama',
-        'model_name': 'deepseek-r1',
+        'model_name': 'deepseek-r1:7b',
         'temperature': 0.7,
-        'output_suffix': 'ollama_deepseek-r1'
+        'output_suffix': 'ollama_deepseek-r1-7b'
     },
     'gpt4': {
         'provider': 'gpt',
@@ -862,10 +862,10 @@ python codes/Inference.py
 
 此阶段将批量处理先前构建的提示词样本，通过API接口获取LLM的应答内容。脚本预设使用本地部署的`ollama`服务，如需接入商业平台，须在配置区填入有效密钥并解除相关代码注释。执行期间，终端会实时展示任务进度编号。
 
-推理工作完结后，`codes/`文件夹内将新增两份记录模型响应的CSV文档，命名遵循`{任务类型}_responses_{模型标识}.csv`规范。以使用`ollama`的`deepseek-r1`模型为例，所得文件为：
+推理工作完结后，`codes/`文件夹内将新增两份记录模型响应的CSV文档，命名遵循`{任务类型}_responses_{模型标识}.csv`规范。以使用`ollama`的`deepseek-r1:7b`模型为例，所得文件为：
 
-- `code_responses_ollama_deepseek-r1.csv`
-- `workflow_responses_ollama_deepseek-r1.csv`
+- `code_responses_ollama_deepseek-r1-7b.csv`
+- `workflow_responses_ollama_deepseek-r1-7b.csv`
 
 这些文件记录了模型的全部响应内容，各字段定义为：
 
@@ -931,7 +931,7 @@ ollama serve
 回顾`utils.py`中的`call_ollama`函数实现：
 
 ```python
-def call_ollama(prompt, model='deepseek-r1', temperature=0.7):
+def call_ollama(prompt, model='deepseek-r1:7b', temperature=0.7):
     response = ollama.generate(
         model=model,
         options={"temperature": temperature},
