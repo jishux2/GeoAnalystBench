@@ -24,9 +24,9 @@ from utils import batch_inference
 MODELS = {
     'ollama_deepseek': {
         'provider': 'ollama',
-        'model_name': 'deepseek-r1',
+        'model_name': 'deepseek-r1:7b',
         'temperature': 0.7,
-        'output_suffix': 'ollama_deepseek-r1'
+        'output_suffix': 'ollama_deepseek-r1-7b'
     },
     'gpt4': {
         'provider': 'gpt',

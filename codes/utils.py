@@ -113,7 +113,7 @@ def call_gemini(prompt, temperature=0.7, max_tokens=None, timeout=None):
     return llm.invoke(prompt)
 
 
-def call_ollama(prompt, model='deepseek-r1', temperature=0.7):
+def call_ollama(prompt, model='deepseek-r1:7b', temperature=0.7):
     """
     调用本地Ollama服务托管的模型
     自动处理DeepSeek-R1的<think>标记，提取实际回答内容
@@ -183,7 +183,7 @@ def batch_inference(task_type, prompt_csv, output_csv, model_config):
             elif provider == 'ollama':
                 response = call_ollama(
                     prompt,
-                    model=model_config.get('model_name', 'deepseek-r1'),
+                    model=model_config.get('model_name', 'deepseek-r1:7b'),
                     temperature=temperature
                 )
             else:
