@@ -1,151 +1,115 @@
 """
-模型推理脚本
-批量调用LLM完成工作流设计和代码编写任务
-当前配置：优先使用本地ollama模型
+GeoAnalystBench 模型推理调度器
+批量调用不同LLM完成工作流设计和代码生成任务
 """
 
 import os
-from utils import call_api
-
-# ==================== API密钥配置 ====================
-# 如需使用商业模型，请取消注释并填入对应API密钥
-
-# OPENAI_API_KEY = "your_openai_key_here"
-# CLAUDE_API_KEY = "your_claude_key_here"
-# GEMINI_API_KEY = "your_gemini_key_here"
-
-# os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
-# os.environ["ANTHROPIC_API_KEY"] = CLAUDE_API_KEY
-# os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
+from utils import batch_inference
 
 
-# ==================== Ollama本地模型推理 ====================
-def run_ollama_inference(model_name='deepseek-r1', temperature=0.7):
-    """使用本地ollama模型进行推理"""
-    print(f"\n开始使用Ollama模型进行推理：{model_name}")
-    print("=" * 60)
+# ============================================================
+# API密钥配置（商业模型需要）
+# ============================================================
+
+# 使用商业模型时，请取消注释并填入有效密钥
+# os.environ["OPENAI_API_KEY"] = "your_openai_key_here"
+# os.environ["ANTHROPIC_API_KEY"] = "your_claude_key_here"
+# os.environ["GOOGLE_API_KEY"] = "your_gemini_key_here"
+
+
+# ============================================================
+# 模型配置
+# ============================================================
+
+MODELS = {
+    'ollama_deepseek': {
+        'provider': 'ollama',
+        'model_name': 'deepseek-r1',
+        'temperature': 0.7,
+        'output_suffix': 'ollama_deepseek-r1'
+    },
+    'gpt4': {
+        'provider': 'gpt',
+        'temperature': 0.7,
+        'output_suffix': 'gpt4'
+    },
+    'claude': {
+        'provider': 'claude',
+        'temperature': 0.7,
+        'output_suffix': 'claude'
+    },
+    'gemini': {
+        'provider': 'gemini',
+        'temperature': 0.7,
+        'output_suffix': 'gemini'
+    },
+}
+
+
+# ============================================================
+# 推理执行函数
+# ============================================================
+
+def run_inference_for_model(model_key, run_code=True, run_workflow=True):
+    """
+    为指定模型执行推理任务
     
-    print("\n[1/2] 执行代码生成任务...")
-    call_api(
-        api_type='code',
-        prompt_file='codes/code_prompts.csv',
-        output_file=f'codes/code_responses_ollama_{model_name.replace(":", "_")}.csv',
-        model='ollama',
-        ollama_model=model_name,
-        temperature=temperature
-    )
+    Args:
+        model_key: MODELS字典中的模型标识
+        run_code: 是否执行代码生成任务
+        run_workflow: 是否执行工作流生成任务
+    """
+    if model_key not in MODELS:
+        raise ValueError(f"未知的模型配置: {model_key}")
     
-    print("\n[2/2] 执行工作流生成任务...")
-    call_api(
-        api_type='workflow',
-        prompt_file='codes/workflow_prompts.csv',
-        output_file=f'codes/workflow_responses_ollama_{model_name.replace(":", "_")}.csv',
-        model='ollama',
-        ollama_model=model_name,
-        temperature=temperature
-    )
+    config = MODELS[model_key]
+    output_suffix = config['output_suffix']
     
-    print("\n" + "=" * 60)
-    print("Ollama推理完成！")
+    print(f"\n{'='*60}")
+    print(f"开始使用 {model_key} 进行推理")
+    print(f"{'='*60}")
+    
+    if run_code:
+        print(f"\n[1/2] 执行代码生成任务...")
+        batch_inference(
+            task_type='code',
+            prompt_csv='codes/code_prompts.csv',
+            output_csv=f'codes/code_responses_{output_suffix}.csv',
+            model_config=config
+        )
+    
+    if run_workflow:
+        print(f"\n[2/2] 执行工作流生成任务...")
+        batch_inference(
+            task_type='workflow',
+            prompt_csv='codes/workflow_prompts.csv',
+            output_csv=f'codes/workflow_responses_{output_suffix}.csv',
+            model_config=config
+        )
+    
+    print(f"\n{model_key} 推理完成！")
+    print(f"{'='*60}\n")
 
 
-# ==================== 商业模型推理（暂时注释） ====================
-"""
-def run_gpt_inference(temperature=0.7):
-    使用GPT模型进行推理
-    print("\n开始使用GPT-4模型进行推理...")
-    print("=" * 60)
-    
-    print("\n[1/2] 执行代码生成任务...")
-    call_api(
-        api_type='code',
-        prompt_file='codes/code_prompts.csv',
-        output_file='codes/code_responses_gpt.csv',
-        model='gpt4',
-        temperature=temperature
-    )
-    
-    print("\n[2/2] 执行工作流生成任务...")
-    call_api(
-        api_type='workflow',
-        prompt_file='codes/workflow_prompts.csv',
-        output_file='codes/workflow_responses_gpt.csv',
-        model='gpt4',
-        temperature=temperature
-    )
-    
-    print("\n" + "=" * 60)
-    print("GPT推理完成！")
+# ============================================================
+# 主执行流程
+# ============================================================
 
-
-def run_claude_inference(temperature=0.7):
-    使用Claude模型进行推理
-    print("\n开始使用Claude模型进行推理...")
-    print("=" * 60)
-    
-    print("\n[1/2] 执行代码生成任务...")
-    call_api(
-        api_type='code',
-        prompt_file='codes/code_prompts.csv',
-        output_file='codes/code_responses_claude.csv',
-        model='claude',
-        temperature=temperature
-    )
-    
-    print("\n[2/2] 执行工作流生成任务...")
-    call_api(
-        api_type='workflow',
-        prompt_file='codes/workflow_prompts.csv',
-        output_file='codes/workflow_responses_claude.csv',
-        model='claude',
-        temperature=temperature
-    )
-    
-    print("\n" + "=" * 60)
-    print("Claude推理完成！")
-
-
-def run_gemini_inference(temperature=0.7):
-    使用Gemini模型进行推理
-    print("\n开始使用Gemini模型进行推理...")
-    print("=" * 60)
-    
-    print("\n[1/2] 执行代码生成任务...")
-    call_api(
-        api_type='code',
-        prompt_file='codes/code_prompts.csv',
-        output_file='codes/code_responses_gemini.csv',
-        model='gemini',
-        temperature=temperature
-    )
-    
-    print("\n[2/2] 执行工作流生成任务...")
-    call_api(
-        api_type='workflow',
-        prompt_file='codes/workflow_prompts.csv',
-        output_file='codes/workflow_responses_gemini.csv',
-        model='gemini',
-        temperature=temperature
-    )
-    
-    print("\n" + "=" * 60)
-    print("Gemini推理完成！")
-"""
-
-
-# ==================== 主函数 ====================
 def main():
-    """主执行流程"""
+    """
+    主执行入口
+    默认使用本地Ollama模型，如需测试其他模型请修改此处
+    """
     print("GeoAnalystBench 模型推理系统")
-    print("=" * 60)
+    print(f"{'='*60}")
     
     # 当前配置：仅使用本地Ollama模型
-    run_ollama_inference(model_name='deepseek-r1', temperature=0.7)
+    run_inference_for_model('ollama_deepseek')
     
-    # 如需使用其他模型，请取消下方注释并配置对应API密钥
-    # run_gpt_inference(temperature=0.7)
-    # run_claude_inference(temperature=0.7)
-    # run_gemini_inference(temperature=0.7)
+    # 使用其他模型的示例（需先配置API密钥）：
+    # run_inference_for_model('gpt4')
+    # run_inference_for_model('claude')
+    # run_inference_for_model('gemini')
     
     print("\n所有推理任务执行完毕！")
 

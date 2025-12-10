@@ -1,6 +1,6 @@
 """
-工具函数库
-提供LLM API调用、文本解析和评估指标计算等核心功能
+GeoAnalystBench 工具函数库
+提供LLM接口统一封装、文本解析和评估指标计算
 """
 
 import re
@@ -12,45 +12,76 @@ from langchain_google_genai import GoogleGenerativeAI
 import ollama
 
 
-# ==================== 文本处理工具 ====================
+# ============================================================
+# 文本解析工具
+# ============================================================
 
 def extract_task_list(text):
-    """从文本中提取任务列表，过滤掉编号行"""
+    """从模型输出中提取任务列表，自动过滤掉纯数字编号行"""
     lines = [line.strip() for line in text.split("\n") if line.strip()]
-    return [line for line in lines if not re.match(r'^\d+\.', line)]
+    return [line for line in lines if not re.match(r'^\d+\.$', line)]
 
 
-def find_task_length(workflow_text):
-    """从工作流文本中提取最大步骤编号"""
-    max_number = 0
+def calculate_workflow_length(workflow_text):
+    """
+    从工作流文本中提取步骤数量
+    通过匹配"数字+句点"模式识别步骤编号，返回最大编号值
+    """
+    max_step = 0
     
     for line in workflow_text.split("\n"):
         i = 0
         while i < len(line):
             if line[i].isdigit():
-                # 检查是否为两位数
+                # 处理两位数编号
                 if i + 1 < len(line) and line[i + 1].isdigit():
                     if i + 2 < len(line) and line[i + 2] == '.':
-                        max_number = max(max_number, int(line[i:i+2]))
+                        max_step = max(max_step, int(line[i:i+2]))
                         i += 2
-                # 单位数且后跟句点
+                # 处理单位数编号
                 elif i + 1 < len(line) and line[i + 1] == '.':
                     num = int(line[i])
                     if num <= 10:  # 避免误识别其他数字
-                        max_number = max(max_number, num)
+                        max_step = max(max_step, num)
                     i += 1
                 else:
                     i += 1
             else:
                 i += 1
     
-    return max_number
+    return max_step
 
 
-# ==================== LLM API调用接口 ====================
+def calculate_length_mae(ground_truth_df, predictions_df):
+    """
+    计算工作流长度预测的平均绝对误差
+    
+    Args:
+        ground_truth_df: 包含专家标注的DataFrame，需包含'id'和'task_length'列
+        predictions_df: 包含模型预测的DataFrame，需包含'task_id'和'task_length'列
+    
+    Returns:
+        float: 平均绝对误差值
+    """
+    total_error = 0
+    count = 0
+    
+    for _, gt_row in ground_truth_df.iterrows():
+        task_predictions = predictions_df[predictions_df["task_id"] == gt_row["id"]]
+        
+        for _, pred_row in task_predictions.iterrows():
+            total_error += abs(pred_row["task_length"] - gt_row["task_length"])
+            count += 1
+    
+    return total_error / count if count > 0 else 0
+
+
+# ============================================================
+# LLM统一接口层
+# ============================================================
 
 def call_gpt(prompt, temperature=0.7, max_tokens=None, timeout=None):
-    """调用GPT模型"""
+    """调用OpenAI GPT系列模型"""
     llm = ChatOpenAI(
         model="gpt-4o-mini",
         temperature=temperature,
@@ -61,7 +92,7 @@ def call_gpt(prompt, temperature=0.7, max_tokens=None, timeout=None):
 
 
 def call_claude(prompt, temperature=0.7, max_tokens=None, timeout=None):
-    """调用Claude模型"""
+    """调用Anthropic Claude系列模型"""
     llm = ChatAnthropic(
         model="claude-3-5-sonnet-20241022",
         temperature=temperature,
@@ -72,7 +103,7 @@ def call_claude(prompt, temperature=0.7, max_tokens=None, timeout=None):
 
 
 def call_gemini(prompt, temperature=0.7, max_tokens=None, timeout=None):
-    """调用Gemini模型"""
+    """调用Google Gemini系列模型"""
     llm = GoogleGenerativeAI(
         model="gemini-1.5-flash",
         temperature=temperature,
@@ -83,7 +114,10 @@ def call_gemini(prompt, temperature=0.7, max_tokens=None, timeout=None):
 
 
 def call_ollama(prompt, model='deepseek-r1', temperature=0.7):
-    """调用本地Ollama模型，自动处理DeepSeek-R1的思维链标记"""
+    """
+    调用本地Ollama服务托管的模型
+    自动处理DeepSeek-R1的<think>标记，提取实际回答内容
+    """
     response = ollama.generate(
         model=model,
         options={"temperature": temperature},
@@ -92,32 +126,36 @@ def call_ollama(prompt, model='deepseek-r1', temperature=0.7):
     
     result = response['response']
     
-    # DeepSeek-R1模型会输出<think>...</think>标记，需要提取实际内容
+    # DeepSeek-R1会输出<think>推理过程</think>实际回答的格式
     if '</think>' in result:
-        return result.split("</think>")[1].strip()
+        return result.split("</think>", 1)[1].strip()
     
     return result
 
 
-# ==================== 批量推理调度 ====================
+# ============================================================
+# 批量推理调度
+# ============================================================
 
-def call_api(api_type, prompt_file, output_file, model, 
-             ollama_model='deepseek-r1', temperature=0.7):
+def batch_inference(task_type, prompt_csv, output_csv, model_config):
     """
-    批量调用LLM进行推理
+    批量执行模型推理任务
     
-    参数说明：
-        api_type: 'workflow'或'code'，指定任务类型
-        prompt_file: 提示词CSV文件路径
-        output_file: 响应结果输出路径
-        model: 'gpt4'/'claude'/'gemini'/'ollama'
-        ollama_model: 使用ollama时的具体模型名
-        temperature: 采样温度参数
+    Args:
+        task_type: 'workflow' 或 'code'
+        prompt_csv: 提示词文件路径
+        output_csv: 输出结果保存路径
+        model_config: 字典格式，包含以下键：
+            - 'provider': 'gpt'/'claude'/'gemini'/'ollama'
+            - 'model_name': 模型标识符（ollama专用）
+            - 'temperature': 采样温度
     """
-    prompts = pd.read_csv(prompt_file)
+    prompts_df = pd.read_csv(prompt_csv)
+    provider = model_config['provider']
+    temperature = model_config.get('temperature', 0.7)
     
     # 初始化输出文件
-    with open(output_file, "w", newline='', encoding='utf-8') as f:
+    with open(output_csv, "w", newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
             'task_id', 'response_id', 'prompt_type', 'response_type',
@@ -125,27 +163,31 @@ def call_api(api_type, prompt_file, output_file, model,
         ])
     
     # 逐个处理提示词
-    total = len(prompts)
-    for idx, row in prompts.iterrows():
+    total = len(prompts_df)
+    for idx, row in prompts_df.iterrows():
         if idx > 0:
-            print('\r' + ' ' * 60 + '\r', end='')
-        print(f'{idx + 1}/{total}', end='', flush=True)
+            print('\r' + ' ' * 80 + '\r', end='')
+        print(f'进度: {idx + 1}/{total} | 任务ID: {row["task_id"]}', end='', flush=True)
         
         prompt = row['prompt_content']
         
         # 每个提示词请求3次以评估稳定性
         responses = []
         for _ in range(3):
-            if model == 'gpt4':
+            if provider == 'gpt':
                 response = call_gpt(prompt, temperature)
-            elif model == 'claude':
+            elif provider == 'claude':
                 response = call_claude(prompt, temperature)
-            elif model == 'gemini':
+            elif provider == 'gemini':
                 response = call_gemini(prompt, temperature)
-            elif model == 'ollama':
-                response = call_ollama(prompt, ollama_model, temperature)
+            elif provider == 'ollama':
+                response = call_ollama(
+                    prompt,
+                    model=model_config.get('model_name', 'deepseek-r1'),
+                    temperature=temperature
+                )
             else:
-                raise ValueError(f"不支持的模型类型：{model}")
+                raise ValueError(f"不支持的模型提供商: {provider}")
             
             responses.append(response)
         
@@ -160,49 +202,20 @@ def call_api(api_type, prompt_file, output_file, model,
             prompt_type = 'original'
         
         # 写入响应结果
-        with open(output_file, "a", newline='', encoding='utf-8') as f:
+        with open(output_csv, "a", newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             for i, response in enumerate(responses):
-                if api_type == 'workflow':
-                    task_length = find_task_length(response)
-                else:
-                    task_length = 'none'
+                task_length = calculate_workflow_length(response) if task_type == 'workflow' else 'none'
                 
                 writer.writerow([
                     row['task_id'],
-                    f"{row['task_id']}{api_type}{i}",
+                    f"{row['task_id']}{task_type}{i}",
                     prompt_type,
-                    api_type,
+                    task_type,
                     row['Arcpy'],
-                    model,
+                    provider,
                     response,
                     task_length
                 ])
     
     print()  # 换行
-
-
-# ==================== 评估指标计算 ====================
-
-def calculate_workflow_length_loss(annotations, responses):
-    """
-    计算工作流长度的平均绝对误差
-    
-    参数：
-        annotations: 包含专家标注的DataFrame
-        responses: 包含模型响应的DataFrame
-    
-    返回：
-        平均长度偏差值
-    """
-    total_loss = 0
-    
-    for _, annotation in annotations.iterrows():
-        task_responses = responses[responses["task_id"] == annotation["id"]]
-        
-        for _, response in task_responses.iterrows():
-            total_loss += abs(
-                response["task_length"] - annotation["task_length"]
-            )
-    
-    return total_loss / len(annotations)
