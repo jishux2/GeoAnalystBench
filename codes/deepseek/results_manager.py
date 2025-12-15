@@ -4,16 +4,18 @@
 负责结果的持久化存储、增量更新和状态追踪
 """
 
-import pandas as pd
+# 标准库
 import csv
 import os
 import re
+import asyncio
 from pathlib import Path
 from typing import Dict, Set, Tuple, Optional
-from threading import Lock
 from datetime import datetime
+
+# 第三方库
+import pandas as pd
 import aiofiles
-import asyncio
 
 
 class ResultsManager:
@@ -32,8 +34,9 @@ class ResultsManager:
         self.workflow_file = self.output_dir / "workflow_responses.csv"
         self.code_file = self.output_dir / "code_responses.csv"
         
-        # 线程安全的写入锁
-        self.async_lock = None  # 先设为None
+        # 异步锁必须在事件循环内创建，此处先初始化为None
+        # 实际的Lock对象会在首次异步调用时由事件循环创建
+        self.async_lock = None
         
         # 已完成任务的索引集合
         self.completed_tasks: Dict[str, Set[Tuple[int, str, int]]] = {
@@ -56,9 +59,21 @@ class ResultsManager:
         ]
         
         for file_path in [self.workflow_file, self.code_file]:
-            if not file_path.exists():
+            # 处理文件不存在、为空或缺失表头的情况
+            if not file_path.exists() or file_path.stat().st_size == 0:
                 with open(file_path, 'w', newline='', encoding='utf-8') as f:
                     csv.writer(f).writerow(header)
+            else:
+                # 检查已存在文件的首行是否为有效表头
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    first_line = f.readline().strip()
+                    # 若首行不是表头（可能因手动删除部分数据导致），则补充表头
+                    if first_line and not first_line.startswith('task_id'):
+                        f.seek(0)
+                        content = f.read()
+                        with open(file_path, 'w', newline='', encoding='utf-8') as fw:
+                            csv.writer(fw).writerow(header)
+                            fw.write(content)
     
     def _load_existing_results(self):
         """加载已有的推理结果，构建完成状态索引"""
@@ -72,14 +87,14 @@ class ResultsManager:
             try:
                 df = pd.read_csv(file_path)
                 for _, row in df.iterrows():
-                    # 解析response_id获取重复序号
+                    # 从response_id中解析重复序号，格式为{task_id}{type}{repeat_idx}
                     match = re.search(r'(\d+)(workflow|code)(\d+)$', str(row['response_id']))
                     if match:
                         task_id = int(match.group(1))
                         repeat_idx = int(match.group(3))
                         prompt_type = row['prompt_type']
                         
-                        # 只有成功的结果才标记为已完成
+                        # 仅将成功的结果标记为已完成，错误结果需要重新执行
                         if pd.isna(row.get('error_info')) or not row.get('error_info'):
                             self.completed_tasks[task_type].add(
                                 (task_id, prompt_type, repeat_idx)
@@ -110,20 +125,23 @@ class ResultsManager:
         return (task_id, prompt_type, repeat_idx) in self.completed_tasks[task_type]
     
     def calculate_workflow_length(self, workflow_text: str) -> int:
-        """从工作流文本中提取步骤数量"""
+        """
+        从工作流文本中提取步骤数量
+        
+        通过正则表达式精确定位tasks列表的范围，避免误统计代码中其他位置的字符串
+        （如matplotlib参数、图表标题等）
+        """
         import re
         
-        # 匹配 tasks = [ ... ] 整个结构
+        # 匹配整个tasks = [...] 结构，re.DOTALL使.能匹配换行符
         pattern = r'tasks\s*=\s*\[(.*?)\]'
         match = re.search(pattern, workflow_text, re.DOTALL)
         
         if not match:
             return 0
         
-        # 提取列表内容
+        # 仅在列表内容中统计引号包裹的字符串数量
         tasks_content = match.group(1)
-        
-        # 统计列表中的引号字符串数量（匹配成对的引号）
         task_pattern = r'"[^"]*"'
         tasks = re.findall(task_pattern, tasks_content)
         
@@ -140,7 +158,7 @@ class ResultsManager:
         error_info: Optional[str] = None
     ):
         """
-        保存单个推理结果
+        保存单个推理结果（异步版本）
         
         Args:
             task_type: 'workflow' 或 'code'
@@ -151,51 +169,33 @@ class ResultsManager:
             response_content: 模型响应内容
             error_info: 错误信息（如有）
         """
-        print(f"[调试] save_result被调用: task_id={task_id}, response_id={response_id}")
-        
-        # 首次调用时初始化锁
-        if self.async_lock is None:
-            self.async_lock = asyncio.Lock()
-            print(f"[调试] 异步锁已初始化")
-        
         file_path = self.workflow_file if task_type == 'workflow' else self.code_file
-        print(f"[调试] 准备写入文件: {file_path}")
         
         # 计算工作流长度
         task_length = 'none'
         if task_type == 'workflow' and not error_info:
-            print(f"[调试] 准备计算工作流长度，文本长度={len(response_content)}")
             task_length = self.calculate_workflow_length(response_content)
-            print(f"[调试] 工作流长度计算完成: {task_length}")
         
         row = [
-            task_id,
-            response_id,
-            prompt_type,
-            task_type,
-            arcpy,
-            'deepseek-chat',
-            response_content if not error_info else '',
-            task_length,
-            error_info or '',
-            datetime.now().isoformat()
+            task_id, response_id, prompt_type, task_type, arcpy,
+            'deepseek-chat', response_content if not error_info else '',
+            task_length, error_info or '', datetime.now().isoformat()
         ]
         
+        # 在内存中构建CSV格式的行，避免csv.writer直接操作异步文件对象
         import csv
         import io
         output = io.StringIO()
         csv.writer(output).writerow(row)
         line = output.getvalue()
-        print(f"[调试] CSV行已构建，长度={len(line)}")
-            
-        print(f"[调试] 准备获取锁...")
+        
+        # 使用异步锁保护文件写入，防止并发写入导致数据交错
+        # 虽然写入是串行的，但配合异步I/O，等待锁的协程不会阻塞事件循环
         async with self.async_lock:
-            print(f"[调试] 已获取锁，开始写入...")
             async with aiofiles.open(file_path, 'a', encoding='utf-8') as f:
                 await f.write(line)
-            print(f"[调试] 写入完成")
-            
-        # 更新完成状态索引
+        
+        # 更新完成状态索引（在锁外执行，因为操作的是内存数据结构）
         if not error_info:
             match = re.search(r'(\d+)(workflow|code)(\d+)$', response_id)
             if match:

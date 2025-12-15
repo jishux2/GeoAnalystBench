@@ -29,7 +29,7 @@ class AsyncInferenceEngine:
         
         Args:
             api_key: DeepSeek API密钥
-            max_concurrent: 最大并发请求数
+            max_concurrent: 最大并发请求数，建议范围20-100
             temperature: 采样温度
         """
         self.api_key = api_key
@@ -39,7 +39,7 @@ class AsyncInferenceEngine:
         self.client: DeepSeekClient = None
         self.results_manager = ResultsManager()
         
-        # 并发控制信号量
+        # 通过信号量控制同时发送的请求数量
         self.semaphore = asyncio.Semaphore(max_concurrent)
         
         # 统计信息
@@ -64,6 +64,8 @@ class AsyncInferenceEngine:
         """
         构建待执行任务列表（仅包含未完成的任务）
         
+        通过与已完成记录比对，实现增量推理和断点续跑
+        
         Args:
             task_type: 'workflow' 或 'code'
             prompts_df: 提示词数据框
@@ -77,9 +79,9 @@ class AsyncInferenceEngine:
             task_id = row['task_id']
             prompt_type = self._get_prompt_type(row)
             
-            # 每个配置需要3次重复
+            # 每个配置需要3次独立推理以评估稳定性
             for repeat_idx in range(3):
-                # 检查是否已完成
+                # 检查该任务是否已成功完成
                 if self.results_manager.is_completed(
                     task_type, task_id, prompt_type, repeat_idx
                 ):
@@ -112,20 +114,18 @@ class AsyncInferenceEngine:
         """
         执行单个推理任务
         
+        通过信号量限制并发数，避免本地资源耗尽或触发API限流
+        
         Args:
             task_config: 任务配置字典
             pbar: 进度条对象
         """
         async with self.semaphore:
             task_type = task_config['task_type']
-            task_id = task_config['task_id']
             prompt = task_config['prompt_content']
             
-            # 添加调试输出
-            print(f"\n[调试] 开始处理任务 {task_id}-{task_config['prompt_type']}-{task_config['repeat_idx']}")
-            
             try:
-                # 根据任务类型选择生成方法
+                # 根据任务类型选择对应的生成方法
                 if task_type == 'workflow':
                     response = await self.client.generate_workflow(
                         prompt, self.temperature
@@ -135,7 +135,7 @@ class AsyncInferenceEngine:
                         prompt, self.temperature
                     )
                 
-                # 保存成功结果
+                # 推理成功后立即写入文件，实现实时增量保存
                 await self.results_manager.save_result(
                     task_type=task_type,
                     task_id=task_config['task_id'],
@@ -148,7 +148,7 @@ class AsyncInferenceEngine:
                 self.stats['success'] += 1
             
             except DeepSeekAPIError as e:
-                # 保存错误信息
+                # 将错误信息写入结果文件，便于后续分析失败原因
                 await self.results_manager.save_result(
                     task_type=task_type,
                     task_id=task_config['task_id'],
@@ -162,7 +162,7 @@ class AsyncInferenceEngine:
                 self.stats['failed'] += 1
             
             except Exception as e:
-                # 捕获未预期的错误
+                # 捕获所有未预期的异常，避免单个任务失败导致整体中断
                 error_msg = f"未知错误：{type(e).__name__} - {str(e)}"
                 await self.results_manager.save_result(
                     task_type=task_type,
@@ -190,7 +190,7 @@ class AsyncInferenceEngine:
         print(f"开始执行{task_type}推理任务")
         print(f"{'='*60}\n")
         
-        # 在这里初始化异步锁
+        # 在事件循环内初始化异步锁，确保锁对象绑定到正确的事件循环
         if self.results_manager.async_lock is None:
             self.results_manager.async_lock = asyncio.Lock()
         
@@ -211,13 +211,12 @@ class AsyncInferenceEngine:
         # 重置统计信息
         self.stats = {'success': 0, 'failed': 0, 'retried': 0}
         
-        # 初始化客户端
+        # 初始化客户端并执行并发推理
         async with DeepSeekClient(self.api_key) as client:
             self.client = client
             
-            # 创建进度条
+            # 创建进度条并并发执行所有任务
             with tqdm(total=len(tasks), desc=f"{task_type}推理进度") as pbar:
-                # 并发执行所有任务
                 await asyncio.gather(*[
                     self._execute_single_task(task, pbar)
                     for task in tasks
