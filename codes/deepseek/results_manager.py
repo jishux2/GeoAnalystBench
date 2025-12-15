@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Dict, Set, Tuple, Optional
 from threading import Lock
 from datetime import datetime
+import aiofiles
+import asyncio
 
 
 class ResultsManager:
@@ -31,7 +33,7 @@ class ResultsManager:
         self.code_file = self.output_dir / "code_responses.csv"
         
         # 线程安全的写入锁
-        self.write_lock = Lock()
+        self.async_lock = None  # 先设为None
         
         # 已完成任务的索引集合
         self.completed_tasks: Dict[str, Set[Tuple[int, str, int]]] = {
@@ -131,7 +133,7 @@ class ResultsManager:
         
         return max_step
     
-    def save_result(
+    async def save_result(
         self,
         task_type: str,
         task_id: int,
@@ -153,12 +155,20 @@ class ResultsManager:
             response_content: 模型响应内容
             error_info: 错误信息（如有）
         """
+        print(f"[调试] save_result被调用: task_id={task_id}, response_id={response_id}")
+        
+        # 首次调用时初始化锁
+        if self.async_lock is None:
+            self.async_lock = asyncio.Lock()
+            print(f"[调试] 异步锁已初始化")
+        
         file_path = self.workflow_file if task_type == 'workflow' else self.code_file
+        print(f"[调试] 准备写入文件: {file_path}")
         
         # 计算工作流长度
         task_length = 'none'
         if task_type == 'workflow' and not error_info:
-            task_length = self.calculate_workflow_length(response_content)
+            task_length = 0
         
         row = [
             task_id,
@@ -173,19 +183,28 @@ class ResultsManager:
             datetime.now().isoformat()
         ]
         
-        # 线程安全的文件写入
-        with self.write_lock:
-            with open(file_path, 'a', newline='', encoding='utf-8') as f:
-                csv.writer(f).writerow(row)
+        import csv
+        import io
+        output = io.StringIO()
+        csv.writer(output).writerow(row)
+        line = output.getvalue()
+        print(f"[调试] CSV行已构建，长度={len(line)}")
             
-            # 更新完成状态索引
-            if not error_info:
-                match = re.search(r'(\d+)(workflow|code)(\d+)$', response_id)
-                if match:
-                    repeat_idx = int(match.group(3))
-                    self.completed_tasks[task_type].add(
-                        (task_id, prompt_type, repeat_idx)
-                    )
+        print(f"[调试] 准备获取锁...")
+        async with self.async_lock:
+            print(f"[调试] 已获取锁，开始写入...")
+            async with aiofiles.open(file_path, 'a', encoding='utf-8') as f:
+                await f.write(line)
+            print(f"[调试] 写入完成")
+            
+        # 更新完成状态索引
+        if not error_info:
+            match = re.search(r'(\d+)(workflow|code)(\d+)$', response_id)
+            if match:
+                repeat_idx = int(match.group(3))
+                self.completed_tasks[task_type].add(
+                    (task_id, prompt_type, repeat_idx)
+                )
     
     def get_statistics(self, task_type: str) -> Dict:
         """

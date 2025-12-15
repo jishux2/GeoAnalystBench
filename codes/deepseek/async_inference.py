@@ -118,7 +118,11 @@ class AsyncInferenceEngine:
         """
         async with self.semaphore:
             task_type = task_config['task_type']
+            task_id = task_config['task_id']
             prompt = task_config['prompt_content']
+            
+            # 添加调试输出
+            print(f"\n[调试] 开始处理任务 {task_id}-{task_config['prompt_type']}-{task_config['repeat_idx']}")
             
             try:
                 # 根据任务类型选择生成方法
@@ -132,7 +136,7 @@ class AsyncInferenceEngine:
                     )
                 
                 # 保存成功结果
-                self.results_manager.save_result(
+                await self.results_manager.save_result(
                     task_type=task_type,
                     task_id=task_config['task_id'],
                     response_id=task_config['response_id'],
@@ -145,7 +149,7 @@ class AsyncInferenceEngine:
             
             except DeepSeekAPIError as e:
                 # 保存错误信息
-                self.results_manager.save_result(
+                await self.results_manager.save_result(
                     task_type=task_type,
                     task_id=task_config['task_id'],
                     response_id=task_config['response_id'],
@@ -160,7 +164,7 @@ class AsyncInferenceEngine:
             except Exception as e:
                 # 捕获未预期的错误
                 error_msg = f"未知错误：{type(e).__name__} - {str(e)}"
-                self.results_manager.save_result(
+                await self.results_manager.save_result(
                     task_type=task_type,
                     task_id=task_config['task_id'],
                     response_id=task_config['response_id'],
@@ -185,6 +189,10 @@ class AsyncInferenceEngine:
         print(f"\n{'='*60}")
         print(f"开始执行{task_type}推理任务")
         print(f"{'='*60}\n")
+        
+        # 在这里初始化异步锁
+        if self.results_manager.async_lock is None:
+            self.results_manager.async_lock = asyncio.Lock()
         
         # 加载提示词
         prompts_df = self._load_prompts(task_type)
