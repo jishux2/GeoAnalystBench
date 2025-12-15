@@ -1,5 +1,17 @@
+# 数据处理基础库
 pandas>=2.0.0
 numpy>=1.24.0
+
+# 异步HTTP客户端
+aiohttp>=3.9.0
+
+# 异步文件操作
+aiofiles>=23.0.0
+
+# 进度条显示
+tqdm>=4.66.0
+
+# LLM API封装（可选，用于其他模型）
 langchain-openai>=0.1.0
 langchain-anthropic>=0.1.0
 langchain-google-genai>=1.0.0

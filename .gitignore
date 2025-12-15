@@ -1,0 +1,46 @@
+# Python运行时
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv
+
+# IDE与编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 项目临时文件
+temp/
+temp*
+test/
+test*
+run_log*
+chats.md
+prompt.md
+
+# 文档草稿
+docs/v*.md
+docs/draft*.md
+docs/week*.md
+
+# 数据与结果文件
+*.csv
+results/
+prompts/
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 环境变量
+.env
+.env.local
