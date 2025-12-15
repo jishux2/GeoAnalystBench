@@ -5,6 +5,7 @@ GeoAnalystBench 提示词生成器
 
 import pandas as pd
 import csv
+from pathlib import Path
 
 
 # ============================================================
@@ -177,10 +178,12 @@ if __name__ == "__main__":
 # ============================================================
 
 def generate_all_prompts(dataset_path='dataset/GeoAnalystBench.csv',
-                        code_output='codes/code_prompts.csv',
-                        workflow_output='codes/workflow_prompts.csv'):
+                        code_output='prompts/code_prompts.csv',
+                        workflow_output='prompts/workflow_prompts.csv'):
     """为所有任务生成完整的提示词矩阵"""
     
+    Path('prompts').mkdir(exist_ok=True)
+
     tasks_df = pd.read_csv(dataset_path)
     
     # 初始化输出文件
