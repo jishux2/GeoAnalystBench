@@ -111,27 +111,23 @@ class ResultsManager:
     
     def calculate_workflow_length(self, workflow_text: str) -> int:
         """从工作流文本中提取步骤数量"""
-        max_step = 0
+        import re
         
-        for line in workflow_text.split("\n"):
-            i = 0
-            while i < len(line):
-                if line[i].isdigit():
-                    if i + 1 < len(line) and line[i + 1].isdigit():
-                        if i + 2 < len(line) and line[i + 2] == '.':
-                            max_step = max(max_step, int(line[i:i+2]))
-                            i += 2
-                    elif i + 1 < len(line) and line[i + 1] == '.':
-                        num = int(line[i])
-                        if num <= 10:
-                            max_step = max(max_step, num)
-                        i += 1
-                    else:
-                        i += 1
-                else:
-                    i += 1
+        # 匹配 tasks = [ ... ] 整个结构
+        pattern = r'tasks\s*=\s*\[(.*?)\]'
+        match = re.search(pattern, workflow_text, re.DOTALL)
         
-        return max_step
+        if not match:
+            return 0
+        
+        # 提取列表内容
+        tasks_content = match.group(1)
+        
+        # 统计列表中的引号字符串数量（匹配成对的引号）
+        task_pattern = r'"[^"]*"'
+        tasks = re.findall(task_pattern, tasks_content)
+        
+        return len(tasks)
     
     async def save_result(
         self,
@@ -168,7 +164,9 @@ class ResultsManager:
         # 计算工作流长度
         task_length = 'none'
         if task_type == 'workflow' and not error_info:
-            task_length = 0
+            print(f"[调试] 准备计算工作流长度，文本长度={len(response_content)}")
+            task_length = self.calculate_workflow_length(response_content)
+            print(f"[调试] 工作流长度计算完成: {task_length}")
         
         row = [
             task_id,
