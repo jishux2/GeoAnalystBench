@@ -93,17 +93,40 @@ API调用过程可能遭遇多种异常情况，平台通过HTTP状态码传递�
 
 等待时长呈指数增长可有效缓解服务端压力，同时避免因固定间隔导致的请求集中。若达到最大重试次数仍未成功，则将错误信息记录并标记该任务为失败状态，后续可通过增量推理机制针对性补偿。
 
+**扩展包集成指引**
+
+针对并发推理场景的特殊需求，本方案整合了三组关键软件包：
+
+```txt
+# 协程化HTTP请求库
+aiohttp>=3.9.0
+
+# 非阻塞式文件读写
+aiofiles>=23.0.0
+
+# 任务进度可视化
+tqdm>=4.66.0
+```
+
+`aiohttp`将HTTP交互转化为协程模式，构成并发API调用的底层支撑。`aiofiles`实现异步文件I/O操作，使磁盘写入与事件循环解耦，消除同步阻塞隐患。`tqdm`库内置的`tqdm.asyncio`模块专门适配协程环境，可精确追踪批量任务的完成动态并在终端呈现实时反馈。
+
+安装流程与其他项目组件保持一致，借助pip工具批量导入全部声明：
+
+```bash
+pip install -r requirements.txt
+```
+
 **系统架构与模块组成**
 
-基于DeepSeek API构建的异步推理系统采用模块化设计，将API交互、结果持久化、任务编排等职责明确划分至独立组件。完整的目录布局如下：
+基于DeepSeek API构建的异步推理系统采用模块化设计，将API交互、成果留存、任务调度等职责明确划分至独立组件。完整的目录布局如下：
 
 ```
 GeoAnalystBench/
 ├─ codes/
 │  ├─ deepseek/                       # DeepSeek专属推理模块
 │  │  ├─ __init__.py
-│  │  ├─ deepseek_client.py           # HTTP通信层封装
-│  │  ├─ async_inference.py           # 异步任务协调中枢
+│  │  ├─ deepseek_client.py           # 远程调用的协议包装
+│  │  ├─ async_inference.py           # 多重请求的并行控制核心
 │  │  └─ results_manager.py           # 数据存储与索引维护
 │  ├─ run_deepseek_inference.py       # 推理系统主程序
 │  └─ prompt_generation.py            # 提示词批量生成工具
@@ -125,7 +148,7 @@ GeoAnalystBench/
 
 **组件职责划分**
 
-**1. `deepseek_client.py` - API客户端接口**
+**1. `deepseek_client.py` - API通信门面**
 
 屏蔽与DeepSeek API的底层交互细节，暴露简洁的异步调用接口。模块定义了`DeepSeekClient`类及配套的异常类型`DeepSeekAPIError`，前者专注于请求构造、响应解析、错误重试等环节，后者承载结构化的故障信息（HTTP状态码、错误分类、详细描述）供上层捕获。
 
@@ -346,9 +369,9 @@ class DeepSeekClient:
 
 类内实现了三个关键方法：`chat_completion`处理通用对话补全请求，内嵌指数退避重试策略；`generate_workflow`和`generate_code`分别针对流程图生成与脚本编写场景，借助前缀续写特性规约输出格式。所有方法均返回协程对象，需配合`await`关键字使用。
 
-**2. `results_manager.py` - 持久化与状态追踪**
+**2. `results_manager.py` - 数据保全与进展监控**
 
-负责推理产出的文件归档及完成进度索引构建。`ResultsManager`类管控两份CSV文档（`workflow_responses.csv`与`code_responses.csv`）的写入操作，同时在内存中保有已完成任务的集合索引，为增量执行与断点恢复提供基础。
+负责推理产出至文件系统的序列化及完成状况的索引构筑。`ResultsManager`类管控两份CSV文档（`workflow_responses.csv`与`code_responses.csv`）的写入操作，同时在内存中保有已完成任务的集合索引，为增量执行与断点恢复提供基础。
 
 ```python
 # codes/deepseek/results_manager.py
@@ -582,13 +605,13 @@ class ResultsManager:
 
 **3. `async_inference.py` - 并发调度引擎**
 
-统筹整个推理流程的执行编排，涵盖任务清单构建、并发度控制、进度可视化、异常隔离等环节。`AsyncInferenceEngine`类接收API凭证与并发参数，初始化客户端及结果管理器实例，通过信号量机制限定同时在途的请求数量。
+统筹整个推理流程的运转协同，涵盖任务清单构建、并发度控制、进度可视化、异常隔离等环节。`AsyncInferenceEngine`类接收API凭证与并发参数，初始化客户端及结果管理器实例，通过信号量机制限定同时在途的请求数量。
 
 ```python
 # codes/deepseek/async_inference.py
 """
 异步推理引擎
-实现并发调度、进度追踪和批量处理
+实现任务的并行分发、进度追踪和批量处理
 """
 
 import asyncio
@@ -830,7 +853,7 @@ class AsyncInferenceEngine:
         await self.run_inference('code')
 ```
 
-`_build_task_list`方法遍历提示词配置表，过滤已完成项后生成待处理清单。`_execute_single_task`将单次推理请求包裹在异常捕获逻辑中，确保个别故障不会传播至整体流程。`run_inference`编排完整的执行序列，利用`asyncio.gather`并发调度全部任务协程。
+`_build_task_list`方法遍历提示词配置表，过滤已完成项后生成待处理清单。`_execute_single_task`将单次推理请求包裹在异常捕获逻辑中，确保个别故障不会传播至整体流程。`run_inference`编排完整的执行序列，利用`asyncio.gather`并发激活全部任务协程。
 
 **4. `run_deepseek_inference.py` - 命令行入口**
 
@@ -861,7 +884,10 @@ def main():
     
     if not api_key:
         print("错误：未设置DEEPSEEK_API_KEY环境变量")
-        print("请执行：export DEEPSEEK_API_KEY='your_api_key_here'")
+        print("\n请根据操作系统选择对应命令：")
+        print("  Linux/macOS: export DEEPSEEK_API_KEY='your_api_key_here'")
+        print("  Windows CMD: set DEEPSEEK_API_KEY=your_api_key_here")
+        print("  PowerShell:  $env:DEEPSEEK_API_KEY='your_api_key_here'")
         return
     
     print("="*60)
@@ -902,18 +928,18 @@ if __name__ == "__main__":
 
 **推理结果的组织形式**
 
-异步推理流程的产出归档于`results/deepseek/`目录，以两份CSV表格形式分别记录流程图构建与脚本编写任务的完整输出。文档结构采用统一的字段配置：
+并发执行产生的全部应答汇总至`results/deepseek/`路径之下，以两份CSV表格形式分别记录流程图构建与脚本编写任务的完整输出。文档结构采用统一的字段配置：
 
 | 字段名 | 含义说明 |
 |--------|----------|
 | `task_id` | 对应基准测试集中的任务序号 |
 | `response_id` | 全局唯一标识符，格式为`{task_id}{type}{repeat_idx}` |
-| `prompt_type` | 提示词配置分类，可能值包括original、domain、dataset、domain_and_dataset |
+| `prompt_type` | 提示词配置分类，可能值包括`original`、`domain`、`dataset`、`domain_and_dataset` |
 | `response_type` | 区分workflow与code两类任务 |
 | `Arcpy` | 布尔值，指示该任务依赖闭源库或开源方案 |
-| `llm_model` | 当前固定为deepseek-chat |
+| `llm_model` | 当前固定为`deepseek-chat` |
 | `response_content` | 模型输出的原始文本 |
-| `task_length` | 工作流包含的步骤总数，代码任务此项为none |
+| `task_length` | 工作流包含的步骤总数，代码任务此项为`none` |
 | `error_info` | 异常发生时记录诊断信息，正常情况下留空 |
 | `timestamp` | ISO格式时间戳，标记写入发生的时刻 |
 
@@ -923,11 +949,11 @@ if __name__ == "__main__":
 
 容错与重试机制依赖`error_info`字段的状态判断。API调用顺利完成时该栏位保持空白；遭遇网络中断、服务端异常或参数校验失败时，会捕获并存储具体的错误类型与描述文本。包含错误信息的条目不会进入已完成索引，下轮执行时会被自动识别并重新尝试，直至获得有效响应或触发人工介入条件。
 
-**数据流转路径**
+**数据转换链路**
 
 完整的推理流程遵循以下数据流向：
 
-1. `prompt_generation.py`从`dataset/GeoAnalystBench.csv`读取任务描述，衍生四种配置组合的提示词，写入`prompts/`目录
+1. `prompt_generation.py`从`dataset/GeoAnalystBench.csv`读取任务描述，拓展出多样化配置的指令模板，存入`prompts/`文件夹
 2. `run_deepseek_inference.py`启动时，`AsyncInferenceEngine`载入提示词文件
 3. `ResultsManager`扫描`results/deepseek/`下的历史记录，重建完成状态索引
 4. 引擎依据索引筛除已完成任务，构建待处理清单
@@ -935,4 +961,4 @@ if __name__ == "__main__":
 6. `ResultsManager`将结果实时追加至对应CSV文档
 7. 全部任务完成后，输出统计摘要并退出
 
-该流程设计确保了数据的单向流动与状态的一致性保障，任何环节的中断都不会导致已完成工作的丢失。
+如此规划保障了数据的单向推进与状态的一致性约束，任何环节的中断都不会导致已完成工作的丢失。
