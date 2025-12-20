@@ -13,14 +13,21 @@ from typing import List, Dict, Optional, Set
 class WorkspaceManager:
     """评测工作空间管理器"""
     
-    # 六种空间分析方法论分类
+    # 空间分析方法论分类的标准描述
+    TASK_CATEGORIES = {
+        'DP': 'detecting and quantifying patterns',
+        'DR': 'determining how places are related',
+        'F': 'finding the best locations and paths',
+        'M': 'measuring size, shape, and distribution',
+        'S': 'spatial interpolation and predictive modeling',
+        'U': 'understanding where'
+    }
+    
+    # 数据集中采用完整描述，通过反向查找建立缩写索引
+    # 首字母大写是为了匹配CSV中"Making predictions"这类格式
     CATEGORY_REVERSE_MAP = {
-        'Detecting and quantifying patterns': 'DP',
-        'Determining how places are related': 'DR',
-        'Finding the best locations and paths': 'F',
-        'Making predictions': 'S',
-        'Measuring size, shape, and distribution': 'M',
-        'Understanding where': 'U'
+        desc.capitalize(): abbr 
+        for abbr, desc in TASK_CATEGORIES.items()
     }
     
     def __init__(
@@ -54,12 +61,12 @@ class WorkspaceManager:
         for idx, row in self.tasks_df.iterrows():
             task_id = idx + 1  # 任务ID从1开始
             
-            # 解析方法论类别
+            # 从三个类别列中提取方法论标签
+            # CSV存储的是完整英文描述，需转换为缩写形式以便筛选
             categories = []
             for cat_col in ['Task Categories1', 'Task Categories2', 'Task Categories3']:
                 if pd.notna(row.get(cat_col)):
                     cat_full = row[cat_col].strip()
-                    # 转换为缩写
                     cat_abbr = self.CATEGORY_REVERSE_MAP.get(cat_full)
                     if cat_abbr:
                         categories.append(cat_abbr)
@@ -129,7 +136,7 @@ class WorkspaceManager:
         """
         import re
         
-        # 尝试提取markdown代码块
+        # 尝试提取markdown代码块，支持带python标记或纯反引号两种格式
         pattern = r'```(?:python)?\s*(.*?)```'
         matches = re.findall(pattern, response_text, re.DOTALL)
         
@@ -140,15 +147,18 @@ class WorkspaceManager:
             # 未找到代码块标记，假定全文为代码
             code = response_text.strip()
         
-        # 规范化换行符
+        # Windows环境下CSV可能引入CRLF，需统一转换为LF
+        # 避免文本模式写入时的双重转换导致`\r\r\n`异常
         code = code.replace('\r\n', '\n').replace('\r', '\n')
         
-        # 自动添加pred_results目录创建逻辑
+        # 模型生成代码通常直接写入相对路径，但不会主动创建目录
+        # 检测到pred_results引用时自动注入目录创建逻辑
         if 'pred_results/' in code:
             if 'makedirs' not in code and 'mkdir' not in code.lower():
                 lines = code.split('\n')
                 insert_pos = 0
                 
+                # 定位import语句块的末尾
                 for i, line in enumerate(lines):
                     if line.strip().startswith(('import ', 'from ')):
                         insert_pos = i + 1
@@ -164,7 +174,8 @@ class WorkspaceManager:
                 lines = lines[:insert_pos] + dir_code + lines[insert_pos:]
                 code = '\n'.join(lines)
         
-        # 添加matplotlib后端设置（解决并发内存问题）
+        # matplotlib在并发环境下处理大型栅格数据时可能出现内存分配失败
+        # 强制使用Agg后端可规避GUI组件带来的额外开销和状态竞争
         if 'matplotlib.pyplot' in code and 'matplotlib.use' not in code:
             # 找到matplotlib.pyplot的导入位置
             lines = code.split('\n')
@@ -175,7 +186,7 @@ class WorkspaceManager:
                     # 在这一行之前插入后端设置
                     backend_code = [
                         'import matplotlib',
-                        "matplotlib.use('Agg')  # 设置后端避免并发内存问题"
+                        "matplotlib.use('Agg')  # 非交互式后端，适配批处理场景"
                     ]
                     lines = lines[:i] + backend_code + lines[i:]
                     code = '\n'.join(lines)
@@ -253,6 +264,10 @@ class WorkspaceManager:
                 code = self.extract_code_from_response(response_text)
                 
                 # 写入代码文件
+                # 明确指定newline='\n'防止Windows平台自动转换换行符
+                # 若CSV本身为CRLF格式，pandas读取后内部已是\r\n
+                # 文本模式默认行为会再次转换导致\r\r\n，引发格式异常
+                # （注：就输出场景而言，newline=''与当前设置效果一致，均可阻止平台相关的换行符映射）
                 with open(code_path, 'w', encoding='utf-8', newline='\n') as f:
                     f.write(code)
                 

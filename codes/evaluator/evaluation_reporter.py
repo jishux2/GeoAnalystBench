@@ -28,7 +28,9 @@ class EvaluationReporter:
         Returns:
             包含统计信息的字典
         """
-        # 收集所有任务的执行状态
+        # 遍历工作空间收集所有已初始化的任务
+        # 这种设计允许报告反映历史累积的评测结果
+        # 而非仅限于单次运行的任务范围
         task_results = []
         
         for task_dir in sorted(self.workspace_root.iterdir()):
@@ -55,7 +57,8 @@ class EvaluationReporter:
         failed = sum(1 for r in task_results if r.get('execution_status') == 'failed')
         pending = sum(1 for r in task_results if r.get('execution_status') == 'pending')
         
-        # 按类别统计
+        # 按方法论类别统计成功率
+        # 一个任务可能归属多个类别，统计时会被计入所有相关维度
         category_stats = defaultdict(lambda: {'total': 0, 'success': 0, 'failed': 0})
         for result in task_results:
             for cat in result.get('categories', []):
@@ -65,7 +68,8 @@ class EvaluationReporter:
                 elif result.get('execution_status') == 'failed':
                     category_stats[cat]['failed'] += 1
         
-        # 错误类型统计
+        # 错误类型分布统计
+        # 通过聚合高频错误识别系统性问题（如依赖缺失、数据格式不兼容等）
         error_types = defaultdict(int)
         for result in task_results:
             if result.get('error_type'):
@@ -106,7 +110,14 @@ class EvaluationReporter:
         return report
     
     def _analyze_opensource_split(self, task_results: List[Dict]) -> Dict:
-        """分析开源/闭源任务的执行差异"""
+        """
+        分析开源/闭源任务的执行差异
+        
+        该维度的对比有助于识别：
+        1. 开源库生态的成熟度与稳定性
+        2. 模型对不同技术栈的适应能力
+        3. 工具链配置的完备程度
+        """
         opensource = {'total': 0, 'success': 0}
         closed = {'total': 0, 'success': 0}
         
@@ -144,19 +155,24 @@ class EvaluationReporter:
         print(f"  失败：{overall['failed']}")
         print(f"  待执行：{overall['pending']}")
         
+        # 将缩写映射为中文描述提升报告的可读性
+        # 技术受众可参考JSON文件中的原始缩写
         print(f"\n按类别统计：")
+        category_names = {
+            'DP': '模式检测',
+            'DR': '位置关联',
+            'F': '路径优化',
+            'M': '形态测量',
+            'S': '空间插值',
+            'U': '位置理解'
+        }
+        
         for cat, stats in report['by_category'].items():
-            cat_name = {
-                'DP': '模式检测',
-                'DR': '位置关联',
-                'F': '路径优化',
-                'M': '形态测量',
-                'S': '空间插值',
-                'U': '位置理解'
-            }.get(cat, cat)
-            
+            cat_name = category_names.get(cat, cat)
             print(f"  {cat_name}（{cat}）：{stats['success']}/{stats['total']} ({stats['success_rate']})")
         
+        # 仅展示最高频的5种错误类型
+        # 长尾错误可通过查看各任务的execution.log进一步诊断
         if report.get('error_distribution'):
             print(f"\n常见错误类型：")
             sorted_errors = sorted(

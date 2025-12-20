@@ -1,7 +1,20 @@
 # codes/setup_evaluation_env.py
 """
 评估环境配置脚本
-自动创建虚拟环境并安装地理空间处理库
+
+创建独立的Python虚拟环境并安装地理空间分析所需的全部依赖。
+该环境与项目主环境隔离，避免版本冲突，专用于执行模型生成的代码。
+
+运行方式：
+    python codes/setup_evaluation_env.py
+
+生成产物：
+    - venv_gis_opensource/          虚拟环境目录
+    - codes/evaluator_config.json   解释器路径配置
+
+后续操作：
+    配置完成后，可直接运行 python codes/run_evaluation.py
+    系统会自动从配置文件读取解释器路径并执行代码验证
 """
 
 import subprocess
@@ -39,22 +52,35 @@ def setup_opensource_env():
     
     # 安装核心库
     print("\n安装地理空间处理库...")
+    
+    # 依赖包按功能分组组织，便于后续维护与扩展
     packages = [
-        "geopandas>=0.14.0",
-        "rasterio>=1.3.0",
-        "shapely>=2.0.0",
-        "fiona>=1.9.0",
-        "pyproj>=3.6.0",
-        "rtree>=1.0.0",
-        "scikit-learn>=1.3.0",
-        "scipy>=1.11.0",
-        "matplotlib>=3.7.0",
-        "pandas>=2.0.0",
-        "numpy>=1.24.0",
-        "pykrige>=1.7.0",
-        "contextily>=1.4.0",
-        "pysal>=24.0",
-        "osmnx>=1.8.0",
+        # === 基础科学计算栈 ===
+        "numpy>=1.24.0",           # 数值计算基础
+        "pandas>=2.0.0",           # 数据框操作
+        "scipy>=1.11.0",           # 科学计算算法
+        "scikit-learn>=1.3.0",     # 机器学习工具
+        
+        # === 矢量数据处理 ===
+        "geopandas>=0.14.0",       # 地理数据框，基于pandas扩展
+        "shapely>=2.0.0",          # 几何对象操作
+        "fiona>=1.9.0",            # 矢量格式I/O（Shapefile/GeoJSON等）
+        "pyproj>=3.6.0",           # 坐标系转换
+        "rtree>=1.0.0",            # 空间索引加速
+        
+        # === 栅格数据处理 ===
+        "rasterio>=1.3.0",         # 栅格格式I/O与操作
+        "scikit-image>=0.21.0",    # 图像处理算法
+        
+        # === 空间分析专用库 ===
+        "pykrige>=1.7.0",          # 克里金插值（地统计学）
+        "pysal>=24.0",             # 空间分析工具集（包含libpysal等子包）
+        "osmnx>=1.8.0",            # OpenStreetMap网络分析
+        
+        # === 可视化工具 ===
+        "matplotlib>=3.7.0",       # 基础绘图
+        "seaborn>=0.12.0",         # 统计可视化
+        "contextily>=1.4.0",       # 底图服务集成
     ]
     
     for package in packages:
@@ -81,13 +107,14 @@ def setup_opensource_env():
 if __name__ == "__main__":
     interpreter_path = setup_opensource_env()
     
-    # 将解释器路径写入配置文件
+    # 将解释器路径持久化到配置文件
+    # CodeExecutor会读取此配置，根据任务类型选择对应环境
     config_file = Path("codes/evaluator_config.json")
     import json
     
     config = {
         "opensource_interpreter": interpreter_path,
-        "arcgis_interpreter": None  # 后续配置ArcGIS Pro环境时填入
+        "arcgis_interpreter": None  # 闭源任务环境需手动配置ArcGIS Pro的Python路径
     }
     
     config_file.parent.mkdir(parents=True, exist_ok=True)
