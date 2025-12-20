@@ -22,7 +22,10 @@ def main():
     
     if not api_key:
         print("错误：未设置DEEPSEEK_API_KEY环境变量")
-        print("请执行：export DEEPSEEK_API_KEY='your_api_key_here'")
+        print("\n请根据操作系统选择对应命令：")
+        print("  Linux/macOS: export DEEPSEEK_API_KEY='your_api_key_here'")
+        print("  Windows CMD: set DEEPSEEK_API_KEY=your_api_key_here")
+        print("  PowerShell:  $env:DEEPSEEK_API_KEY='your_api_key_here'")
         return
     
     print("="*60)
