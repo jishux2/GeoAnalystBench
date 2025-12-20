@@ -6,7 +6,7 @@ __pycache__/
 .Python
 
 # 虚拟环境
-venv/
+venv*/
 env/
 ENV/
 .venv
@@ -34,8 +34,13 @@ docs/week*.md
 
 # 数据与结果文件
 *.csv
+*.log
 results/
 prompts/
+
+# 评测工作空间
+evaluation_workspace/
+codes/evaluator_config.json
 
 # 操作系统
 .DS_Store
