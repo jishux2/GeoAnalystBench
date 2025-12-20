@@ -50,7 +50,11 @@ def setup_opensource_env():
         "scipy>=1.11.0",
         "matplotlib>=3.7.0",
         "pandas>=2.0.0",
-        "numpy>=1.24.0"
+        "numpy>=1.24.0",
+        "pykrige>=1.7.0",
+        "contextily>=1.4.0",
+        "pysal>=24.0",
+        "osmnx>=1.8.0",
     ]
     
     for package in packages:

@@ -14,13 +14,13 @@ class WorkspaceManager:
     """评测工作空间管理器"""
     
     # 六种空间分析方法论分类
-    TASK_CATEGORIES = {
-        'DP': 'detecting and quantifying patterns',
-        'DR': 'determining how places are related',
-        'F': 'finding the best locations and paths',
-        'M': 'measuring size, shape, and distribution',
-        'S': 'spatial interpolation and predictive modeling',
-        'U': 'understanding where'
+    CATEGORY_REVERSE_MAP = {
+        'Detecting and quantifying patterns': 'DP',
+        'Determining how places are related': 'DR',
+        'Finding the best locations and paths': 'F',
+        'Making predictions': 'S',
+        'Measuring size, shape, and distribution': 'M',
+        'Understanding where': 'U'
     }
     
     def __init__(
@@ -58,16 +58,18 @@ class WorkspaceManager:
             categories = []
             for cat_col in ['Task Categories1', 'Task Categories2', 'Task Categories3']:
                 if pd.notna(row.get(cat_col)):
-                    cat_abbr = row[cat_col].strip()
-                    if cat_abbr in self.TASK_CATEGORIES:
+                    cat_full = row[cat_col].strip()
+                    # 转换为缩写
+                    cat_abbr = self.CATEGORY_REVERSE_MAP.get(cat_full)
+                    if cat_abbr:
                         categories.append(cat_abbr)
             
             self.task_configs[task_id] = {
                 'id': task_id,
                 'title': row['Task'],
-                'is_opensource': row['Open or Closed Source'] == 'T',
+                'is_opensource': row['Open Source'] == 'T',
                 'categories': categories,
-                'reference_code': row['Code'],
+                'reference_code': row['CodeString'],
                 'workflow_length': row['Task Length']
             }
     
@@ -137,6 +139,47 @@ class WorkspaceManager:
         else:
             # 未找到代码块标记，假定全文为代码
             code = response_text.strip()
+        
+        # 规范化换行符
+        code = code.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # 自动添加pred_results目录创建逻辑
+        if 'pred_results/' in code:
+            if 'makedirs' not in code and 'mkdir' not in code.lower():
+                lines = code.split('\n')
+                insert_pos = 0
+                
+                for i, line in enumerate(lines):
+                    if line.strip().startswith(('import ', 'from ')):
+                        insert_pos = i + 1
+                
+                dir_code = [
+                    '',
+                    '# 确保输出目录存在',
+                    "import os",
+                    "os.makedirs('pred_results', exist_ok=True)",
+                    ''
+                ]
+                
+                lines = lines[:insert_pos] + dir_code + lines[insert_pos:]
+                code = '\n'.join(lines)
+        
+        # 添加matplotlib后端设置（解决并发内存问题）
+        if 'matplotlib.pyplot' in code and 'matplotlib.use' not in code:
+            # 找到matplotlib.pyplot的导入位置
+            lines = code.split('\n')
+            
+            for i, line in enumerate(lines):
+                # 匹配 "import matplotlib.pyplot as plt" 或 "import matplotlib.pyplot"
+                if 'import matplotlib.pyplot' in line:
+                    # 在这一行之前插入后端设置
+                    backend_code = [
+                        'import matplotlib',
+                        "matplotlib.use('Agg')  # 设置后端避免并发内存问题"
+                    ]
+                    lines = lines[:i] + backend_code + lines[i:]
+                    code = '\n'.join(lines)
+                    break
         
         return code
     
@@ -210,7 +253,7 @@ class WorkspaceManager:
                 code = self.extract_code_from_response(response_text)
                 
                 # 写入代码文件
-                with open(code_path, 'w', encoding='utf-8') as f:
+                with open(code_path, 'w', encoding='utf-8', newline='\n') as f:
                     f.write(code)
                 
                 # 创建任务级配置文件

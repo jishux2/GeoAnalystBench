@@ -163,6 +163,9 @@ class CodeExecutor:
                 error_message=str(e)
             )
 
+        # 转换为绝对路径（关键修复）
+        code_path = code_path.resolve()
+
         # 构建执行命令
         cmd = [interpreter, str(code_path)]  # 使用选择的解释器
         

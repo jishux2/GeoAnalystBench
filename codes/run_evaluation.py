@@ -42,7 +42,7 @@ def main():
     workspace_mgr.setup_workspace(
         task_ids=task_ids,
         prompt_type="domain_and_dataset",
-        force_overwrite=False
+        force_overwrite=True
     )
     
     # 第三步：执行代码
