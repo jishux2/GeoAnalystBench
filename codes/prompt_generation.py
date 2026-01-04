@@ -148,12 +148,18 @@ def build_code_prompt(task, instruction, use_arcpy, domain_knowledge=None,
     else:
         prompt += "\n5. Use latest open source python packages only."
     
+    prompt += "\n6. Wrap critical third-party library functions (e.g., gpd.sjoin, gpd.overlay) using the monitor_call decorator. The decorator definition and error handling infrastructure will be automatically injected - you only need to add the wrapper calls."
     prompt += "\n"
     
     if include_example:
         example = '''
 """
-import packages
+import geopandas as gpd  # or other packages
+
+# Wrap the specific geopandas functions you will call in your code
+gpd.function1 = monitor_call('gpd.function1')(gpd.function1)
+gpd.function2 = monitor_call('gpd.function2')(gpd.function2)
+# Add more wrappers based on which functions you actually use
 
 def main():
     path = "path"

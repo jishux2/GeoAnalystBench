@@ -186,43 +186,266 @@ class WorkspaceManager:
         
         return sorted(selected)
     
-    def extract_code_from_response(self, response_text: str) -> str:
+    def inject_instrumentation(self, code: str) -> str:
         """
-        从模型响应中提取Python代码
+        向模型生成的代码注入增强版插桩逻辑
         
-        处理多种可能的格式：
-        1. 标准markdown代码块：```python\n...\n```
-        2. 无语言标记的代码块：```\n...\n```
-        3. 纯文本代码（无围栏标记）
+        该方法在代码提取后、写入文件前执行，将复杂的调试机制统一注入，
+        避免在提示词中暴露过多实现细节。插桩包含两个核心组件：
+        
+        1. 上下文感知的异常钩子：通过解析出错代码行，优先展示被访问的变量字段
+        2. 函数调用监控装饰器：记录第三方库函数的参数详情
         
         Args:
-            response_text: 模型原始响应
+            code: 从响应中提取的原始Python代码
         
         Returns:
-            提取的纯代码文本
+            注入插桩逻辑后的完整代码
+        """
+        # 完整的插桩代码块，采用英文注释以保持生成代码的风格一致性
+        instrumentation_code = '''
+import sys
+import json
+import traceback
+import functools
+import re
+import linecache
+
+# Context-aware object summarization for error diagnostics
+def extract_accessed_fields(code_line, var_name):
+    """Extract field accesses from a line of code for a given variable"""
+    escaped_var = re.escape(var_name)
+    
+    # Match var_name['field'] or var_name["field"]
+    pattern1 = rf"(?<!\\w){escaped_var}\\['([^']+)'\\]"
+    pattern2 = rf'(?<!\\w){escaped_var}\\["([^"]+)"\\]'
+    
+    # Match var_name.field (but not var_name.method())
+    pattern3 = rf"(?<!\\w){escaped_var}\\.(\\w+)(?!\\()"
+    
+    fields = set()
+    
+    try:
+        fields.update(re.findall(pattern1, code_line))
+    except re.error:
+        pass
+    
+    try:
+        fields.update(re.findall(pattern2, code_line))
+    except re.error:
+        pass
+    
+    try:
+        fields.update(re.findall(pattern3, code_line))
+    except re.error:
+        pass
+    
+    return list(fields)
+
+
+def smart_summarize(obj, code_line=None, var_name=None, max_len=200):
+    """Intelligently summarize objects, prioritizing fields accessed in code"""
+    try:
+        obj_type = type(obj).__name__
+        
+        # Handle pandas Series with context-aware field selection
+        if 'Series' in obj_type:
+            result = {'_type': 'Series', '_dtype': str(obj.dtype)}
+            
+            # Extract fields accessed in the error-triggering code line
+            priority_fields = []
+            if code_line and var_name:
+                try:
+                    priority_fields = extract_accessed_fields(code_line, var_name)
+                except Exception as e:
+                    result['_extract_error'] = str(e)
+            
+            # Display accessed fields first
+            shown_fields = set()
+            for field in priority_fields:
+                if field in obj.index:
+                    try:
+                        result[field] = str(obj[field])[:200]
+                        shown_fields.add(field)
+                    except Exception as e:
+                        result[f'{field}_error'] = str(e)
+            
+            # Fill remaining slots with other fields (max 20 total)
+            remaining = 20 - len(shown_fields)
+            for field in obj.index:
+                if field not in shown_fields and remaining > 0:
+                    try:
+                        result[str(field)] = str(obj[field])[:100]
+                        shown_fields.add(field)
+                        remaining -= 1
+                    except Exception:
+                        pass
+            
+            if len(obj) > len(shown_fields):
+                result['_truncated'] = f'... and {len(obj) - len(shown_fields)} more fields'
+            
+            return result
+        
+        # Handle DataFrame/GeoDataFrame
+        if 'DataFrame' in obj_type or 'GeoDataFrame' in obj_type:
+            info = {
+                '_type': obj_type,
+                '_shape': f'{obj.shape[0]} rows × {obj.shape[1]} columns',
+                '_columns': list(obj.columns)[:10]
+            }
+            if 'GeoDataFrame' in obj_type and hasattr(obj, 'geometry') and 'geometry' in obj.columns:
+                try:
+                    geom_types = obj.geometry.geom_type.value_counts().to_dict()
+                    info['_geometry_types'] = geom_types
+                except Exception:
+                    pass
+            return info
+        
+        # Handle collections
+        if isinstance(obj, (list, tuple)):
+            return f"{obj_type}(len={len(obj)})"
+        if isinstance(obj, dict):
+            return f"dict(keys={list(obj.keys())[:5]})"
+        
+        # Default fallback
+        return str(obj)[:max_len]
+    
+    except Exception as e:
+        return f"<{type(obj).__name__} object>"
+
+
+# Enhanced global exception hook with stack frame analysis
+def capture_exception(exc_type, exc_value, exc_traceback):
+    """Capture exception with detailed context including local variables"""
+    stack_info = []
+    tb = exc_traceback
+    
+    while tb is not None:
+        frame = tb.tb_frame
+        code_line = linecache.getline(frame.f_code.co_filename, tb.tb_lineno).strip()
+        
+        # Summarize local variables with code context awareness
+        frame_locals = {}
+        for var_name, var_value in frame.f_locals.items():
+            frame_locals[var_name] = smart_summarize(
+                var_value,
+                code_line=code_line,
+                var_name=var_name
+            )
+        
+        stack_info.append({
+            'file': frame.f_code.co_filename,
+            'function': frame.f_code.co_name,
+            'line': tb.tb_lineno,
+            'code': code_line,
+            'locals': frame_locals
+        })
+        tb = tb.tb_next
+    
+    context = {
+        'error_type': exc_type.__name__,
+        'error_message': str(exc_value),
+        'traceback': ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)),
+        'stack_frames': stack_info
+    }
+    
+    with open('error_trace.json', 'w', encoding='utf-8') as f:
+        json.dump(context, f, indent=2, ensure_ascii=False)
+    
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+sys.excepthook = capture_exception
+
+
+# Function call monitoring decorator
+def monitor_call(func_name):
+    """Decorator to capture function arguments when errors occur"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                arg_summaries = [smart_summarize(arg) for arg in args]
+                kwargs_summaries = {k: smart_summarize(v) for k, v in kwargs.items()}
+                
+                detail = {
+                    'function': func_name,
+                    'args_summary': arg_summaries,
+                    'kwargs_summary': kwargs_summaries,
+                    'error': str(e)
+                }
+                
+                with open('call_details.json', 'a', encoding='utf-8') as f:
+                    json.dump(detail, f, indent=2, ensure_ascii=False)
+                    f.write('\\n')
+                raise
+        return wrapper
+    return decorator
+
+'''
+        
+        # 定位第一个import语句的位置，将插桩代码插在最前面
+        # 这样确保异常钩子在任何业务逻辑执行前就已注册
+        import re
+        lines = code.split('\n')
+        insert_pos = 0
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#'):
+                # 跳过开头的注释和空行，找到第一个实际语句
+                if re.match(r'^(import |from )', stripped):
+                    insert_pos = i
+                    break
+        
+        # 在找到的位置插入插桩代码
+        lines.insert(insert_pos, instrumentation_code)
+        
+        return '\n'.join(lines)
+    
+    def extract_code_from_response(self, response_text: str) -> str:
+        """
+        从模型响应中提取Python代码并注入调试机制
+        
+        处理流程包含三个阶段：
+        1. 识别并剥离Markdown代码块标记
+        2. 注入上下文感知的插桩逻辑（异常钩子与函数监控）
+        3. 补充运行时辅助代码（目录创建、后端配置等）
+        
+        Args:
+            response_text: 模型返回的原始文本
+        
+        Returns:
+            经过增强处理的可执行Python代码
         """
         import re
         
-        # 尝试提取markdown代码块
+        # 提取markdown代码块，优先选择最长匹配以应对多块情况
         pattern = r'```(?:python)?\s*(.*?)```'
         matches = re.findall(pattern, response_text, re.DOTALL)
         
         if matches:
-            # 取最长的代码块（避免误提取示例片段）
             code = max(matches, key=len).strip()
         else:
-            # 未找到代码块标记，假定全文为代码
+            # 未检测到围栏标记时，将全文视为纯代码
             code = response_text.strip()
         
-        # 规范化换行符
+        # 统一换行符格式，消除跨平台差异
         code = code.replace('\r\n', '\n').replace('\r', '\n')
         
-        # 自动添加pred_results目录创建逻辑
+        # 注入插桩逻辑，该步骤在所有其他修改之前执行
+        # 确保调试机制优先于业务代码加载
+        code = self.inject_instrumentation(code)
+        
+        # 检测输出路径引用，自动补充目录创建逻辑
+        # 避免因目录不存在导致的文件写入失败
         if 'pred_results/' in code:
             if 'makedirs' not in code and 'mkdir' not in code.lower():
                 lines = code.split('\n')
                 insert_pos = 0
                 
+                # 在import语句之后插入目录创建代码
                 for i, line in enumerate(lines):
                     if line.strip().startswith(('import ', 'from ')):
                         insert_pos = i + 1
@@ -238,7 +461,8 @@ class WorkspaceManager:
                 lines = lines[:insert_pos] + dir_code + lines[insert_pos:]
                 code = '\n'.join(lines)
         
-        # 添加matplotlib后端设置（解决并发内存问题）
+        # 为matplotlib设置非交互式后端，规避并发环境下的GUI资源竞争
+        # Agg后端仅生成图像文件，不依赖显示设备
         if 'matplotlib.pyplot' in code and 'matplotlib.use' not in code:
             # 找到matplotlib.pyplot的导入位置
             lines = code.split('\n')
@@ -383,11 +607,11 @@ class WorkspaceManager:
         return pending
 ```
 
-该模块承担两项核心职责。其一是从CSV结果文件中批量提取模型输出的Python脚本，通过正则表达式识别Markdown代码块边界并剥离格式标记，得到纯净的程序文本。其二是构建任务元数据索引，解析基准数据集中的类别标注、技术栈属性等字段，为后续按维度过滤待测对象提供查询基础。
+该模块承载三项关键能力。首要职责是从CSV应答记录中批量提取模型编写的Python程序，借助正则匹配定位Markdown围栏标记的边界位置并剥离格式包装，获得可直接执行的源码文本。其次是建立任务元数据的结构化索引，将基准数据集中的方法论归属、技术栈标识等属性字段解析入库，为随后的多维度筛选操作提供查询基础。
 
-索引构建过程中需处理一处数据格式差异：CSV采用完整英文描述标注方法论类别（如`Determining how places are related`），而筛选接口接受缩写形式（`DR`）。模块内部维护反向映射表完成术语转换，使外部调用方无需感知底层表示差异。
+索引构建环节需协调一处表示层级的不一致：原始数据采用完整术语标注分析类别（诸如`Determining how places are related`），但筛选接口识别的是简化缩写（对应`DR`）。模块通过内置的双向映射机制完成词汇转换，令外部调用无需介入底层编码细节。
 
-代码抽取完成后，系统会自动注入两类辅助逻辑。第一类针对输出目录缺失问题，在检测到`pred_results`路径引用时插入`os.makedirs`语句。第二类应对`matplotlib`并发内存分配异常，强制配置`Agg`后端以规避GUI组件的资源竞争。这些注入操作在提取阶段一次性完成，避免运行时动态修改带来的复杂性。
+代码提取流程包含三个层次的增强处理。最先执行的是插桩逻辑的植入——将上下文感知的异常钩子与函数监控装饰器嵌入程序开头，确保调试基础设施优先于业务代码加载。随后针对输出路径缺失风险，在侦测到`pred_results`引用时自动补充目录创建语句。最后应对可视化库的并发冲突，为`matplotlib`强制指定非交互式后端，消除GUI资源竞争隐患。上述转换均于写入文件前集中完成，规避运行期动态干预引入的额外开销。
 
 **2. `code_executor.py` - 并发调度与环境隔离机制**
 

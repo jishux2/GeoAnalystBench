@@ -221,7 +221,7 @@ ollama pull deepseek-r1:7b
 
 **1. `prompt_generation.py` - 提示词矩阵构建**
 
-此脚本负责从基准数据集中读取任务信息，并为每个任务衍生出四种配置组合的提示词变体。通过控制是否包含领域知识和数据集描述两个维度，系统地生成了用于工作流推导和代码实现的完整提示词集合，最终输出为`prompts/code_prompts.csv`和`prompts/workflow_prompts.csv`两个文件。
+此脚本从基准数据集提取任务描述，按领域知识与数据集信息的纳入与否划分出四类参数组合，为每项任务批量构造工作流推导及代码编写所需的交互文本。生成的提示词专注于业务逻辑引导，将调试机制的注入延后至执行准备阶段处理，最终输出至`prompts/code_prompts.csv`与`prompts/workflow_prompts.csv`。
 
 ```python
 """
@@ -297,7 +297,7 @@ def generate_all_prompts(
     - type: 依据输出目标分别标注为'code'或'workflow'
     - domain_knowledge/dataset: 通过配置组合的遍历逻辑赋予布尔值
     - Arcpy: 读取'Open Source'列内容并执行逻辑非运算（'T'对应False）
-    - prompt_content: 将数据集相关列传入模板函数，结合参数生成完整文本
+    - prompt_content: 依据配置参数调用模板函数，输出包含任务指令与示例框架的引导文本
     
     代码生成提示词的结构样式：
     
@@ -322,10 +322,16 @@ def generate_all_prompts(
     3. Put all code under main function, no helper functions.
     4. Limit your output to code, no extra information.
     5. Use latest **Arcpy** functions only.  # Arcpy为False时切换为开源库指引
+    6. Wrap critical third-party library functions (e.g., gpd.sjoin, gpd.overlay) using the monitor_call decorator. The decorator definition and error handling infrastructure will be automatically injected - you only need to add the wrapper calls.
     
     [Expected Sample Output Begin]
     """
-    import packages
+    import geopandas as gpd  # or other packages
+    
+    # Wrap the specific geopandas functions you will call in your code
+    gpd.function1 = monitor_call('gpd.function1')(gpd.function1)
+    gpd.function2 = monitor_call('gpd.function2')(gpd.function2)
+    # Add more wrappers based on which functions you actually use
     
     def main():
         path = "path"
