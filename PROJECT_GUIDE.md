@@ -12,7 +12,8 @@ GeoAnalystBench/
 │
 ├─ docs/                                      # 专项技术指引
 │  ├─ ollama-integration.md                   # Ollama平台部署流程与运行时调优
-│  └─ deepseek-api-guide.md                   # DeepSeek异步推理架构与接口应用
+│  ├─ deepseek-api-guide.md                   # DeepSeek异步推理架构与接口应用
+│  └─ code-validation-deployment.md           # 自动化验证框架的搭建与运维实践
 │
 ├─ case_study/                                # 实证研究材料
 │  └─ figures/                                # 可视化成果
