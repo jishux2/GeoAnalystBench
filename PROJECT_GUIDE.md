@@ -28,8 +28,8 @@ GeoAnalystBench/
 │  └─ utils.py                                # 通用函数库，封装API调用、文本解析及指标计算
 │
 ├─ prompts/                                   # 生成的提示词集合
-│  ├─ code_prompts.csv                        # 代码实现任务的提示词矩阵
-│  └─ workflow_prompts.csv                    # 工作流构建任务的提示词矩阵
+│  ├─ code_prompts.csv                        # 脚本编写场景的指令配置集
+│  └─ workflow_prompts.csv                    # 流程推导任务的引导文本库
 │
 ├─ dataset/                                   # 实验数据
 │  └─ GeoAnalystBench.csv                     # 包含50道题目的评测集，记录任务描述、参考代码等字段
