@@ -1,18 +1,11 @@
 # codes/deepseek/async_inference.py
 """
-异步推理引擎
-实现并发调度、进度追踪和批量处理
+DeepSeek API异步推理引擎（精简版）
+仅提供三个核心API调用接口，不负责任务管理和状态追踪
 """
 
 import asyncio
-import pandas as pd
-from pathlib import Path
-from typing import List, Dict, Tuple
-from tqdm.asyncio import tqdm
-from datetime import datetime
-
 from .deepseek_client import DeepSeekClient, DeepSeekAPIError
-from .results_manager import ResultsManager
 
 
 class AsyncInferenceEngine:
@@ -21,223 +14,143 @@ class AsyncInferenceEngine:
     def __init__(
         self,
         api_key: str,
-        max_concurrent: int = 30,
-        temperature: float = 0.7
+        temperature: float = 0.7,
+        enable_thinking: bool = True
     ):
         """
         初始化引擎
         
         Args:
             api_key: DeepSeek API密钥
-            max_concurrent: 最大并发请求数，建议范围20-100
             temperature: 采样温度
+            enable_thinking: 是否启用思考模式
         """
         self.api_key = api_key
-        self.max_concurrent = max_concurrent
         self.temperature = temperature
+        self.enable_thinking = enable_thinking
         
         self.client: DeepSeekClient = None
-        self.results_manager = ResultsManager()
-        
-        # 通过信号量控制同时发送的请求数量
-        self.semaphore = asyncio.Semaphore(max_concurrent)
-        
-        # 统计信息
-        self.stats = {
-            'success': 0,
-            'failed': 0,
-            'retried': 0
-        }
     
-    def _load_prompts(self, task_type: str) -> pd.DataFrame:
-        """加载提示词文件"""
-        file_path = f"prompts/{task_type}_prompts.csv"
-        if not Path(file_path).exists():
-            raise FileNotFoundError(f"提示词文件不存在：{file_path}")
-        return pd.read_csv(file_path)
+    async def __aenter__(self):
+        """异步上下文管理器入口"""
+        self.client = DeepSeekClient(self.api_key)
+        await self.client.__aenter__()
+        return self
     
-    def _build_task_list(
-        self,
-        task_type: str,
-        prompts_df: pd.DataFrame
-    ) -> List[Dict]:
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器退出"""
+        if self.client:
+            await self.client.__aexit__(exc_type, exc_val, exc_tb)
+    
+    async def generate_initial_code(self, prompt: str) -> str:
         """
-        构建待执行任务列表（仅包含未完成的任务）
-        
-        通过与已完成记录比对，实现增量推理和断点续跑
+        生成首轮完整代码
         
         Args:
-            task_type: 'workflow' 或 'code'
-            prompts_df: 提示词数据框
+            prompt: 完整提示词文本
         
         Returns:
-            任务配置列表
-        """
-        tasks = []
+            生成的Python代码（包含markdown代码块标记）
         
-        for _, row in prompts_df.iterrows():
-            task_id = row['task_id']
-            prompt_type = self._get_prompt_type(row)
+        Raises:
+            DeepSeekAPIError: API调用失败
+        """
+        # 优先使用前缀续写优化输出格式
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": "```python\n", "prefix": True}
+        ]
+        
+        try:
+            response = await self.client.chat_completion(
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=8192,
+                stop=["```"],
+                use_prefix=True
+            )
             
-            # 每个配置需要3次独立推理以评估稳定性
-            for repeat_idx in range(3):
-                # 检查该任务是否已成功完成
-                if self.results_manager.is_completed(
-                    task_type, task_id, prompt_type, repeat_idx
-                ):
-                    continue
-                
-                tasks.append({
-                    'task_type': task_type,
-                    'task_id': task_id,
-                    'prompt_type': prompt_type,
-                    'prompt_content': row['prompt_content'],
-                    'arcpy': row['Arcpy'],
-                    'repeat_idx': repeat_idx,
-                    'response_id': f"{task_id}{task_type}{repeat_idx}"
-                })
+            # 补全代码块标记
+            return "```python\n" + response + "\n```"
         
-        return tasks
+        except DeepSeekAPIError as e:
+            # 前缀续写失败时降级到标准模式
+            if e.status_code in [400, 422]:
+                return await self._generate_with_thinking(prompt)
+            raise
     
-    def _get_prompt_type(self, row: pd.Series) -> str:
-        """根据配置确定提示词类型"""
-        if row['domain_knowledge'] and row['dataset']:
-            return 'domain_and_dataset'
-        elif row['domain_knowledge']:
-            return 'domain'
-        elif row['dataset']:
-            return 'dataset'
-        else:
-            return 'original'
-    
-    async def _execute_single_task(self, task_config: Dict, pbar: tqdm):
+    async def generate_patch(self, prompt: str) -> dict:
         """
-        执行单个推理任务
-        
-        通过信号量限制并发数，避免本地资源耗尽或触发API限流
+        生成代码补丁（JSON格式）
         
         Args:
-            task_config: 任务配置字典
-            pbar: 进度条对象
+            prompt: 完整提示词文本
+        
+        Returns:
+            包含target_code和replacement_code的字典
+        
+        Raises:
+            DeepSeekAPIError: API调用失败或JSON解析失败
         """
-        async with self.semaphore:
-            task_type = task_config['task_type']
-            prompt = task_config['prompt_content']
-            
-            try:
-                # 根据任务类型选择对应的生成方法
-                if task_type == 'workflow':
-                    response = await self.client.generate_workflow(
-                        prompt, self.temperature
-                    )
-                else:
-                    response = await self.client.generate_code(
-                        prompt, self.temperature
-                    )
-                
-                # 推理成功后立即写入文件，实现实时增量保存
-                await self.results_manager.save_result(
-                    task_type=task_type,
-                    task_id=task_config['task_id'],
-                    response_id=task_config['response_id'],
-                    prompt_type=task_config['prompt_type'],
-                    arcpy=task_config['arcpy'],
-                    response_content=response
-                )
-                
-                self.stats['success'] += 1
-            
-            except DeepSeekAPIError as e:
-                # 将错误信息写入结果文件，便于后续分析失败原因
-                await self.results_manager.save_result(
-                    task_type=task_type,
-                    task_id=task_config['task_id'],
-                    response_id=task_config['response_id'],
-                    prompt_type=task_config['prompt_type'],
-                    arcpy=task_config['arcpy'],
-                    response_content='',
-                    error_info=str(e)
-                )
-                
-                self.stats['failed'] += 1
-            
-            except Exception as e:
-                # 捕获所有未预期的异常，避免单个任务失败导致整体中断
-                error_msg = f"未知错误：{type(e).__name__} - {str(e)}"
-                await self.results_manager.save_result(
-                    task_type=task_type,
-                    task_id=task_config['task_id'],
-                    response_id=task_config['response_id'],
-                    prompt_type=task_config['prompt_type'],
-                    arcpy=task_config['arcpy'],
-                    response_content='',
-                    error_info=error_msg
-                )
-                
-                self.stats['failed'] += 1
-            
-            finally:
-                pbar.update(1)
+        return await self.client.generate_code_patch(
+            prompt,
+            self.temperature,
+            self.enable_thinking
+        )
     
-    async def run_inference(self, task_type: str):
+    async def diagnose(self, prompt: str) -> dict:
         """
-        执行特定类型的批量推理
+        执行错误诊断分析（JSON格式）
         
         Args:
-            task_type: 'workflow' 或 'code'
+            prompt: 完整提示词文本
+        
+        Returns:
+            包含root_cause、api_queries、keywords、example_query的字典
+        
+        Raises:
+            DeepSeekAPIError: API调用失败或JSON解析失败
         """
-        print(f"\n{'='*60}")
-        print(f"开始执行{task_type}推理任务")
-        print(f"{'='*60}\n")
-        
-        # 在事件循环内初始化异步锁，确保锁对象绑定到正确的事件循环
-        if self.results_manager.async_lock is None:
-            self.results_manager.async_lock = asyncio.Lock()
-        
-        # 加载提示词
-        prompts_df = self._load_prompts(task_type)
-        
-        # 构建待执行任务列表
-        tasks = self._build_task_list(task_type, prompts_df)
-        
-        if not tasks:
-            print(f"所有{task_type}任务已完成，无需执行！")
-            return
-        
-        print(f"待执行任务数：{len(tasks)}")
-        print(f"最大并发数：{self.max_concurrent}")
-        print(f"开始时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        
-        # 重置统计信息
-        self.stats = {'success': 0, 'failed': 0, 'retried': 0}
-        
-        # 初始化客户端并执行并发推理
-        async with DeepSeekClient(self.api_key) as client:
-            self.client = client
-            
-            # 创建进度条并并发执行所有任务
-            with tqdm(total=len(tasks), desc=f"{task_type}推理进度") as pbar:
-                await asyncio.gather(*[
-                    self._execute_single_task(task, pbar)
-                    for task in tasks
-                ])
-        
-        # 输出统计信息
-        print(f"\n{'='*60}")
-        print(f"{task_type}推理完成")
-        print(f"{'='*60}")
-        print(f"成功：{self.stats['success']}")
-        print(f"失败：{self.stats['failed']}")
-        print(f"成功率：{self.stats['success']/(len(tasks))*100:.2f}%")
-        print(f"结束时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        
-        # 显示整体进度
-        stats = self.results_manager.get_statistics(task_type)
-        print(f"整体进度：{stats['completed']}/{stats['total']} "
-              f"({stats['progress_pct']:.2f}%)")
-        print(f"剩余任务：{stats['remaining']}\n")
+        return await self.client.diagnose_error(
+            prompt,
+            self.temperature,
+            self.enable_thinking
+        )
     
-    async def run_all(self):
-        """依次执行工作流和代码推理"""
-        await self.run_inference('workflow')
-        await self.run_inference('code')
+    async def _generate_with_thinking(self, prompt: str) -> str:
+        """
+        使用思考模式生成代码（内部辅助方法）
+        
+        Args:
+            prompt: 完整提示词
+        
+        Returns:
+            生成的代码文本
+        """
+        messages = [{"role": "user", "content": prompt}]
+        
+        url = f"{self.client.BASE_URL}/chat/completions"
+        
+        payload = {
+            "model": "deepseek-chat",
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": 8192,
+            "stream": False
+        }
+        
+        if self.enable_thinking:
+            payload["thinking"] = {"type": "enabled"}
+        
+        async with self.client.session.post(url, json=payload) as response:
+            response_data = await response.json()
+            
+            if response.status == 200:
+                return response_data["choices"][0]["message"]["content"]
+            
+            error_info = response_data.get("error", {})
+            raise DeepSeekAPIError(
+                response.status,
+                error_info.get("message", "未知错误"),
+                error_info.get("type", "unknown_error")
+            )

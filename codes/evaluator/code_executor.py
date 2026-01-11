@@ -279,7 +279,7 @@ class CodeExecutor:
     def execute_batch(
         self,
         task_ids: List[int],
-        prompt_type: str = "domain_and_dataset",
+        round_num: int,  # 改为接收round_num而非prompt_type
         use_concurrent: bool = True
     ) -> List[ExecutionResult]:
         """
@@ -287,7 +287,7 @@ class CodeExecutor:
         
         Args:
             task_ids: 任务ID列表
-            prompt_type: 提示词类型
+            round_num: 当前轮次
             use_concurrent: 是否使用并发执行
         
         Returns:
@@ -295,6 +295,7 @@ class CodeExecutor:
         """
         print(f"\n开始执行代码验证...")
         print(f"任务数量：{len(task_ids)}")
+        print(f"当前轮次：{round_num}")
         print(f"并发模式：{'是' if use_concurrent else '否'}")
         print(f"超时设置：{self.timeout}秒\n")
         
@@ -306,7 +307,7 @@ class CodeExecutor:
             # 每个子进程拥有独立的内存空间和Python解释器实例
             with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = {
-                    executor.submit(self.execute_single_task, tid, prompt_type): tid
+                    executor.submit(self.execute_single_task, tid, round_num): tid
                     for tid in task_ids
                 }
                 
@@ -343,7 +344,7 @@ class CodeExecutor:
             from tqdm import tqdm
             
             for task_id in tqdm(task_ids, desc="执行进度"):
-                result = self.execute_single_task(task_id, prompt_type)
+                result = self.execute_single_task(task_id, round_num)
                 results.append(result)
         
         # 输出统计信息
