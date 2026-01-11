@@ -143,6 +143,10 @@ import traceback
 import functools
 import re
 import linecache
+import os  # 新增
+
+# 从环境变量读取输出目录（相对路径）
+EVAL_OUTPUT_DIR = os.environ.get('EVAL_OUTPUT_DIR', '.')
 
 # Context-aware object summarization for error diagnostics
 def extract_accessed_fields(code_line, var_name):
@@ -282,7 +286,9 @@ def capture_exception(exc_type, exc_value, exc_traceback):
         'stack_frames': stack_info
     }
     
-    with open('error_trace.json', 'w', encoding='utf-8') as f:
+    # 使用环境变量指定的路径
+    trace_file = os.path.join(EVAL_OUTPUT_DIR, 'error_trace.json')
+    with open(trace_file, 'w', encoding='utf-8') as f:
         json.dump(context, f, indent=2, ensure_ascii=False)
     
     sys.__excepthook__(exc_type, exc_value, exc_traceback)
@@ -309,9 +315,28 @@ def monitor_call(func_name):
                     'error': str(e)
                 }
                 
-                with open('call_details.json', 'a', encoding='utf-8') as f:
-                    json.dump(detail, f, indent=2, ensure_ascii=False)
-                    f.write('\\n')
+                # 使用环境变量指定的路径
+                detail_file = os.path.join(EVAL_OUTPUT_DIR, 'call_details.json')
+                
+                # 读取现有数据
+                if os.path.exists(detail_file):
+                    with open(detail_file, 'r', encoding='utf-8') as f:
+                        try:
+                            data = json.load(f)
+                            if not isinstance(data, list):
+                                data = []
+                        except json.JSONDecodeError:
+                            data = []
+                else:
+                    data = []
+                
+                # 追加新记录
+                data.append(detail)
+                
+                # 写回文件
+                with open(detail_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                
                 raise
         return wrapper
     return decorator

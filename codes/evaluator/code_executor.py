@@ -4,6 +4,7 @@
 负责在隔离环境中运行生成代码并收集执行结果
 """
 
+import os
 import subprocess
 import json
 import time
@@ -141,21 +142,23 @@ class CodeExecutor:
     def execute_single_task(
         self,
         task_id: int,
-        prompt_type: str = "domain_and_dataset"
+        round_num: int = 1  # 新增轮次参数
     ) -> ExecutionResult:
         """
         执行单个任务的生成代码
         
         Args:
             task_id: 任务ID
-            prompt_type: 提示词类型
+            round_num: 当前执行轮次（1-3）
         
         Returns:
             执行结果对象
         """
         task_dir = self.workspace_root / str(task_id)
-        code_path = task_dir / "generated" / f"{prompt_type}.py"
-        output_dir = task_dir / "outputs" / prompt_type
+        
+        # 路径调整：引入轮次层级
+        code_path = task_dir / "generated" / f"round_{round_num}_code.py"
+        output_dir = task_dir / "outputs" / f"round_{round_num}"
         log_path = output_dir / "execution.log"
         
         # 检查代码文件是否存在
@@ -170,6 +173,15 @@ class CodeExecutor:
         
         # 确保输出目录存在
         output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 清空本轮次的调试文件
+        call_details_file = output_dir / "call_details.json"
+        error_trace_file = output_dir / "error_trace.json"
+        
+        if call_details_file.exists():
+            call_details_file.write_text('[]', encoding='utf-8')
+        if error_trace_file.exists():
+            error_trace_file.unlink()
         
         # 根据任务属性选择对应的Python环境
         try:
@@ -191,6 +203,11 @@ class CodeExecutor:
         # 构建执行命令
         cmd = [interpreter, str(code_path)]
         
+        # 准备环境变量：传递相对于task_dir的输出目录路径
+        env = os.environ.copy()
+        relative_output_dir = f"outputs/round_{round_num}"
+        env['EVAL_OUTPUT_DIR'] = relative_output_dir
+        
         start_time = time.time()
         
         try:
@@ -199,6 +216,7 @@ class CodeExecutor:
             result = subprocess.run(
                 cmd,
                 cwd=str(task_dir),
+                env=env,  # 传递包含输出目录信息的环境变量
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
@@ -211,6 +229,7 @@ class CodeExecutor:
             # 将完整输出写入日志文件
             with open(log_path, 'w', encoding='utf-8') as f:
                 f.write(f"=== 执行时间：{datetime.now().isoformat()} ===\n")
+                f.write(f"=== 轮次：{round_num} ===\n")
                 f.write(f"=== 耗时：{duration:.2f}秒 ===\n\n")
                 f.write("=== STDOUT ===\n")
                 f.write(result.stdout)
