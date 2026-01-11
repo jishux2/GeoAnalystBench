@@ -294,26 +294,29 @@ class CodeExecutor:
                 from concurrent.futures import as_completed
                 from tqdm import tqdm
                 
+                results_dict = {}  # ← 改用字典
+                
                 for future in tqdm(as_completed(futures), total=len(task_ids), desc="执行进度"):
                     try:
                         result = future.result()
-                        results.append(result)
-                        
-                        # 更新任务配置
-                        self._update_task_status(result, prompt_type)
+                        task_id = futures[future]  # ← 获取对应的task_id
+                        results_dict[task_id] = result  # ← 按task_id存储
                     
                     except Exception as e:
                         # 捕获execute_single_task自身抛出的意外异常
                         # 正常的执行失败已转换为ExecutionResult，不会走到这里
                         task_id = futures[future]
                         print(f"任务{task_id}执行异常：{e}")
-                        results.append(ExecutionResult(
+                        results_dict[task_id] = ExecutionResult(
                             task_id=task_id,
                             success=False,
                             duration=0,
                             error_type="ExecutorError",
                             error_message=str(e)
-                        ))
+                        )
+                
+                # 按task_ids顺序重建结果列表
+                results = [results_dict[tid] for tid in task_ids]
         
         else:
             # 串行模式：逐个执行任务
@@ -323,7 +326,6 @@ class CodeExecutor:
             for task_id in tqdm(task_ids, desc="执行进度"):
                 result = self.execute_single_task(task_id, prompt_type)
                 results.append(result)
-                self._update_task_status(result, prompt_type)
         
         # 输出统计信息
         success_count = sum(1 for r in results if r.success)
@@ -332,27 +334,3 @@ class CodeExecutor:
         print(f"失败：{len(results) - success_count}")
         
         return results
-    
-    def _update_task_status(self, result: ExecutionResult, prompt_type: str):
-        """更新任务执行状态"""
-        task_dir = self.workspace_root / str(result.task_id)
-        config_path = task_dir / "evaluation.json"
-        
-        if not config_path.exists():
-            return
-        
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            
-            config['execution_status'] = 'success' if result.success else 'failed'
-            config['execution_duration'] = result.duration
-            config['error_type'] = result.error_type
-            config['error_message'] = result.error_message
-            config['last_execution'] = datetime.now().isoformat()
-            
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-        
-        except Exception as e:
-            print(f"警告：更新任务{result.task_id}状态失败 - {e}")
