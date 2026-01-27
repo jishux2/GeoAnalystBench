@@ -70,8 +70,11 @@ class DialogueManager:
                     "generated_code": None,
                     "execution": {
                         "status": "pending",
-                        "error_trace": None,
-                        "call_details": None
+                        "duration": None,          # 新增：执行耗时（秒）
+                        "error_type": None,        # 新增：错误类型
+                        "error_message": None,     # 新增：错误描述
+                        "error_trace": None,       # 仅运行时失效时填充
+                        "call_details": None       # 仅运行时失效时填充
                     },
                     "diagnosis": None
                 }

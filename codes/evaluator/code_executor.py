@@ -19,35 +19,43 @@ import sys
 class ExecutionResult:
     """代码执行结果"""
     
+    # 定义错误类型常量
+    RUNTIME_ERRORS = {'RuntimeError', 'TimeoutError', 'ExecutorError'}
+    PRECONDITION_ERRORS = {'FileNotFoundError', 'EnvironmentError'}
+    
     def __init__(
         self,
         task_id: int,
         success: bool,
-        duration: float,
-        stdout: str = "",
-        stderr: str = "",
+        duration: float = 0.0,
         error_type: Optional[str] = None,
         error_message: Optional[str] = None
     ):
         self.task_id = task_id
         self.success = success
         self.duration = duration
-        self.stdout = stdout
-        self.stderr = stderr
         self.error_type = error_type
         self.error_message = error_message
     
-    def to_dict(self) -> Dict:
-        """转换为字典格式"""
+    def is_runtime_failure(self) -> bool:
+        """判断是否为运行时失效（需读取诊断文件）"""
+        return self.error_type in self.RUNTIME_ERRORS
+    
+    def is_precondition_failure(self) -> bool:
+        """判断是否为前置条件缺失（无需诊断文件）"""
+        return self.error_type in self.PRECONDITION_ERRORS
+    
+    def to_execution_record(self) -> Dict:
+        """
+        转换为对话历史中execution字段的标准格式
+        
+        注意：不包含error_trace和call_details，由调用方根据错误类型决定是否填充
+        """
         return {
-            'task_id': self.task_id,
-            'success': self.success,
+            'status': 'success' if self.success else 'failed',
             'duration': self.duration,
-            'stdout': self.stdout,
-            'stderr': self.stderr,
             'error_type': self.error_type,
-            'error_message': self.error_message,
-            'timestamp': datetime.now().isoformat()
+            'error_message': self.error_message
         }
 
 
@@ -96,14 +104,18 @@ class CodeExecutor:
         self._verify_interpreter(self.opensource_interpreter)
     
     def _get_interpreter_for_task(self, task_id: int) -> str:
-        """根据任务类型选择合适的解释器"""
-        # 导入对话管理器（避免循环依赖）
+        """
+        根据任务技术栈属性选择合适的解释器
+        
+        数据源从废弃的evaluation.json迁移至对话历史的metadata字段，
+        确保状态管理的单一数据源原则
+        """
         from evaluator.dialogue_manager import DialogueManager
         
         dialogue_mgr = DialogueManager(str(self.workspace_root))
         history = dialogue_mgr.get_history(task_id)
         
-        # 对话历史不存在时回退到默认开源环境
+        # 对话历史缺失时采用开源环境作为安全降级策略
         if not history or 'metadata' not in history:
             return self.opensource_interpreter
         
@@ -170,7 +182,7 @@ class CodeExecutor:
         # 确保输出目录存在
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # 清空本轮次的调试文件
+        # 清空本轮次的调试文件，避免历史数据干扰诊断
         call_details_file = output_dir / "call_details.json"
         error_trace_file = output_dir / "error_trace.json"
         
@@ -191,15 +203,16 @@ class CodeExecutor:
                 error_message=str(e)
             )
         
-        # 转换为绝对路径避免cwd引起的路径重复
-        # subprocess设置cwd后，相对路径会基于新工作目录再次拼接
-        # 导致"evaluation_workspace/1/evaluation_workspace/1/..."的错误
+        # 转换为绝对路径规避cwd引起的路径重复问题
+        # subprocess设置cwd后，相对路径会基于新工作目录再次拼接，
+        # 导致"evaluation_workspace/1/evaluation_workspace/1/..."的错误嵌套
         code_path = code_path.resolve()
         
         # 构建执行命令
         cmd = [interpreter, str(code_path)]
         
-        # 准备环境变量：传递相对于task_dir的输出目录路径
+        # 准备环境变量：传递相对于任务目录的输出路径
+        # 插桩代码通过读取此变量动态构建诊断文件的完整路径
         env = os.environ.copy()
         relative_output_dir = f"outputs/round_{round_num}"
         env['EVAL_OUTPUT_DIR'] = relative_output_dir
@@ -246,8 +259,6 @@ class CodeExecutor:
                 task_id=task_id,
                 success=success,
                 duration=duration,
-                stdout=result.stdout,
-                stderr=result.stderr,
                 error_type=error_type,
                 error_message=error_message
             )

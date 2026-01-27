@@ -313,7 +313,6 @@ class IterativeRepairOrchestrator:
     async def _execute_codes(self, task_ids: List[int], round_num: int) -> List:
         """并发执行代码"""
         
-        # CodeExecutor.execute_batch是同步方法，需要在线程池中运行
         loop = asyncio.get_event_loop()
         
         results = await loop.run_in_executor(
@@ -321,7 +320,7 @@ class IterativeRepairOrchestrator:
             self.executor.execute_batch,
             task_ids,
             round_num,
-            True  # use_concurrent
+            True
         )
         
         # 根据结果更新对话历史
@@ -330,37 +329,47 @@ class IterativeRepairOrchestrator:
                 self.dialogue_mgr.update_round(
                     task_id,
                     round_num,
-                    execution={'status': 'success'}
+                    execution={'status': 'success', 'duration': result.duration}
                 )
                 self.dialogue_mgr.mark_success(task_id)
                 print(f"✓ 任务{task_id}执行成功")
+            
             else:
-                # 读取错误文件
-                task_dir = Path(self.workspace_mgr.workspace_root) / str(task_id)
-                output_dir = task_dir / "outputs" / f"round_{round_num}"
+                # 构建基础执行记录
+                execution_record = result.to_execution_record()
                 
-                error_trace = None
-                call_details = None
+                # 仅对运行时失效读取诊断文件
+                if result.is_runtime_failure():
+                    task_dir = Path(self.workspace_mgr.workspace_root) / str(task_id)
+                    output_dir = task_dir / "outputs" / f"round_{round_num}"
+                    
+                    error_trace = None
+                    call_details = None
+                    
+                    error_file = output_dir / "error_trace.json"
+                    if error_file.exists():
+                        with open(error_file, 'r', encoding='utf-8') as f:
+                            error_trace = json.load(f)
+                    
+                    call_file = output_dir / "call_details.json"
+                    if call_file.exists():
+                        with open(call_file, 'r', encoding='utf-8') as f:
+                            call_details = json.load(f)
+                    
+                    # 仅在实际读取到数据时填充字段
+                    if error_trace:
+                        execution_record['error_trace'] = error_trace
+                    if call_details:
+                        execution_record['call_details'] = call_details
                 
-                error_file = output_dir / "error_trace.json"
-                if error_file.exists():
-                    with open(error_file, 'r', encoding='utf-8') as f:
-                        error_trace = json.load(f)
-                
-                call_file = output_dir / "call_details.json"
-                if call_file.exists():
-                    with open(call_file, 'r', encoding='utf-8') as f:
-                        call_details = json.load(f)
+                # 对前置条件缺失不读取诊断文件，保持字段为None
                 
                 self.dialogue_mgr.update_round(
                     task_id,
                     round_num,
-                    execution={
-                        'status': 'failed',
-                        'error_trace': error_trace,
-                        'call_details': call_details
-                    }
+                    execution=execution_record
                 )
+                
                 print(f"✗ 任务{task_id}执行失败：{result.error_type}")
         
         return results
