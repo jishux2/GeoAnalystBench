@@ -96,24 +96,20 @@ class CodeExecutor:
         self._verify_interpreter(self.opensource_interpreter)
     
     def _get_interpreter_for_task(self, task_id: int) -> str:
-        """
-        根据任务类型选择合适的解释器
+        """根据任务类型选择合适的解释器"""
+        # 导入对话管理器（避免循环依赖）
+        from evaluator.dialogue_manager import DialogueManager
         
-        开源任务使用独立虚拟环境（geopandas/rasterio等）
-        闭源任务依赖ArcGIS Pro内置Python环境
-        """
-        task_dir = self.workspace_root / str(task_id)
-        config_path = task_dir / "evaluation.json"
+        dialogue_mgr = DialogueManager(str(self.workspace_root))
+        history = dialogue_mgr.get_history(task_id)
         
-        # 配置文件不存在时默认使用开源解释器
-        # 这种情况通常发生在手动创建任务目录的测试场景
-        if not config_path.exists():
+        # 对话历史不存在时回退到默认开源环境
+        if not history or 'metadata' not in history:
             return self.opensource_interpreter
         
-        with open(config_path, 'r', encoding='utf-8') as f:
-            task_config = json.load(f)
+        is_opensource = history['metadata'].get('is_opensource', True)
         
-        if task_config.get('is_opensource', True):
+        if is_opensource:
             return self.opensource_interpreter
         else:
             if not self.arcgis_interpreter:
@@ -314,7 +310,10 @@ class CodeExecutor:
                 from concurrent.futures import as_completed
                 from tqdm import tqdm
                 
-                results_dict = {}  # ← 改用字典
+                # 使用字典存储结果，避免as_completed乱序导致的匹配错位
+                # as_completed按完成时间返回future，与task_ids的输入顺序无关，
+                # 若直接append会导致zip时结果与任务ID错配
+                results_dict = {}
                 
                 for future in tqdm(as_completed(futures), total=len(task_ids), desc="执行进度"):
                     try:
@@ -335,7 +334,7 @@ class CodeExecutor:
                             error_message=str(e)
                         )
                 
-                # 按task_ids顺序重建结果列表
+                # 按task_ids顺序重建结果列表，确保与输入顺序一致
                 results = [results_dict[tid] for tid in task_ids]
         
         else:

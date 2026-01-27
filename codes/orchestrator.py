@@ -68,18 +68,10 @@ class IterativeRepairOrchestrator:
         }
     
     async def initialize_tasks(self, task_ids: List[int]):
-        """
-        初始化任务的对话历史
-        
-        为每个任务创建dialogue_history.json并构建首轮提示词
-        
-        Args:
-            task_ids: 待处理的任务ID列表
-        """
+        """初始化任务的对话历史"""
         print(f"\n初始化{len(task_ids)}个任务的对话历史...")
         
         for task_id in task_ids:
-            # 检查是否已初始化
             existing = self.dialogue_mgr.get_history(task_id)
             if existing:
                 print(f"任务{task_id}已存在对话历史，跳过")
@@ -88,11 +80,16 @@ class IterativeRepairOrchestrator:
             # 构建首轮提示词
             prompt_dict = self.initial_prompt_builder.build(task_id)
             
-            # 初始化对话历史
+            # 从workspace_mgr获取元数据
+            task_config = self.workspace_mgr.task_configs[task_id]
+            
+            # 传递元数据至对话历史
             self.dialogue_mgr.initialize(
                 task_id=task_id,
                 initial_prompt=prompt_dict,
-                max_rounds=self.max_rounds
+                max_rounds=self.max_rounds,
+                categories=task_config['categories'],
+                is_opensource=task_config['is_opensource']
             )
             
             print(f"任务{task_id}初始化完成")
@@ -138,12 +135,12 @@ class IterativeRepairOrchestrator:
             diagnosis_tasks = [self._diagnose_error(tid, round_num=1) for tid in failed_tasks]
             await asyncio.gather(*diagnosis_tasks)
         
-        # 阶段5：检索辅助信息（为第2轮准备）
-        if failed_tasks:
-            print(f"\n阶段5：为失败任务检索辅助信息...")
-            # TODO: 实现检索逻辑
-            # 当前暂时跳过，留待知识库模块完成后补充
-            pass
+        # # 阶段5：检索辅助信息（为第2轮准备）
+        # if failed_tasks:
+        #     print(f"\n阶段5：为失败任务检索辅助信息...")
+        #     # TODO: 实现检索逻辑
+        #     # 当前暂时跳过，留待知识库模块完成后补充
+        #     pass
         
         # 更新统计
         success_count = len(task_ids) - len(failed_tasks)
@@ -382,6 +379,8 @@ class IterativeRepairOrchestrator:
                 call_details=round_data['execution']['call_details'] or []
             )
             
+            print(f"prompt: \n{prompt}")
+            
             try:
                 diagnosis = await self.inference_engine.diagnose(prompt)
                 
@@ -407,6 +406,8 @@ class IterativeRepairOrchestrator:
                 dialogue_history=history,
                 round_num=round_num
             )
+            
+            print(f"prompt: \n{prompt}")
             
             try:
                 patch = await self.inference_engine.generate_patch(prompt)

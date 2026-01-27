@@ -33,7 +33,9 @@ class DialogueManager:
         self,
         task_id: int,
         initial_prompt: Dict[str, str],
-        max_rounds: int = 3
+        max_rounds: int = 3,
+        categories: List[str] = None,  # 新增
+        is_opensource: bool = True     # 新增
     ):
         """
         初始化对话历史
@@ -52,8 +54,15 @@ class DialogueManager:
             "task_id": task_id,
             "max_rounds": max_rounds,
             "current_round": 1,
-            "status": "pending",  # pending/success/failed/max_rounds_reached
+            "status": "pending",
             "created_at": datetime.now().isoformat(),
+            
+            # 新增元数据区段
+            "metadata": {
+                "categories": categories or [],
+                "is_opensource": is_opensource
+            },
+            
             "rounds": [
                 {
                     "round": 1,
