@@ -1,13 +1,12 @@
 # codes/deepseek/deepseek_client.py
 """
 DeepSeek API 客户端封装
-提供异步请求接口、错误处理和JSON格式响应解析
+提供异步HTTP通信基础设施，不涉及业务层逻辑
 """
 
 import asyncio
 import aiohttp
-import json
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 
 
 class DeepSeekAPIError(Exception):
@@ -71,12 +70,11 @@ class DeepSeekClient:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         stop: Optional[List[str]] = None,
+        thinking: Optional[Dict[str, str]] = None,
         use_prefix: bool = False
     ) -> str:
         """
         调用对话补全API
-        
-        注意：这个方法保留是因为generate_initial_code需要用到前缀续写功能
         
         Args:
             messages: 对话消息列表
@@ -84,6 +82,7 @@ class DeepSeekClient:
             temperature: 采样温度
             max_tokens: 最大输出token数
             stop: 停止序列
+            thinking: 思考模式配置，如{"type": "enabled"}
             use_prefix: 是否启用前缀续写功能
         
         Returns:
@@ -105,6 +104,8 @@ class DeepSeekClient:
         
         if stop:
             payload["stop"] = stop
+        if thinking:
+            payload["thinking"] = thinking
         
         # 执行带指数退避的重试策略
         for attempt in range(self.max_retries + 1):
@@ -142,73 +143,54 @@ class DeepSeekClient:
         
         raise DeepSeekAPIError(500, "达到最大重试次数", "max_retries_exceeded")
     
-    async def generate_code_patch(
+    async def chat_completion_with_tools(
         self,
-        prompt: str,
+        messages: List[Dict[str, str]],
+        tools: List[Dict],
+        model: str = "deepseek-chat",
         temperature: float = 0.7,
-        enable_thinking: bool = True
-    ) -> dict:
+        max_tokens: int = 8192,
+        thinking: Optional[Dict[str, str]] = None
+    ) -> Dict:
         """
-        生成代码补丁（JSON格式响应）
+        调用支持工具调用的对话补全API，返回完整响应对象
         
         Args:
-            prompt: 完整提示词
+            messages: 对话消息列表
+            tools: 工具定义列表
+            model: 模型名称
             temperature: 采样温度
-            enable_thinking: 是否启用思考模式
+            max_tokens: 最大输出token数
+            thinking: 思考模式配置
         
         Returns:
-            包含target_code和replacement_code的字典
+            完整的API响应对象
         
         Raises:
-            DeepSeekAPIError: API调用失败或JSON解析失败
+            DeepSeekAPIError: API调用失败时抛出
         """
-        messages = [{"role": "user", "content": prompt}]
-        
         url = f"{self.BASE_URL}/chat/completions"
         
         payload = {
-            "model": "deepseek-chat",
+            "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": 8192,
-            "stream": False
+            "max_tokens": max_tokens,
+            "stream": False,
+            "tools": tools
         }
         
-        if enable_thinking:
-            payload["thinking"] = {"type": "enabled"}
+        if thinking:
+            payload["thinking"] = thinking
         
-        # 执行带重试的请求
         for attempt in range(self.max_retries + 1):
             try:
                 async with self.session.post(url, json=payload) as response:
                     response_data = await response.json()
                     
                     if response.status == 200:
-                        content = response_data["choices"][0]["message"]["content"]
-                        
-                        # 解析JSON响应
-                        try:
-                            cleaned = content.strip()
-                            # 移除可能的markdown代码块标记
-                            if cleaned.startswith('```'):
-                                lines = cleaned.split('\n')
-                                # 提取代码块内容（去掉首尾的```标记）
-                                if lines[0].startswith('```'):
-                                    lines = lines[1:]
-                                if lines and lines[-1].strip() == '```':
-                                    lines = lines[:-1]
-                                cleaned = '\n'.join(lines)
-                            
-                            return json.loads(cleaned)
-                        
-                        except json.JSONDecodeError as e:
-                            raise DeepSeekAPIError(
-                                422,
-                                f"补丁响应不是有效JSON: {str(e)}\n原始内容: {content[:300]}",
-                                "json_decode_error"
-                            )
+                        return response_data
                     
-                    # 错误处理
                     error_info = response_data.get("error", {})
                     error_msg = error_info.get("message", "未知错误")
                     error_type = error_info.get("type", "unknown_error")
@@ -233,26 +215,3 @@ class DeepSeekClient:
                 raise DeepSeekAPIError(0, f"网络错误: {str(e)}", "network_error")
         
         raise DeepSeekAPIError(500, "达到最大重试次数", "max_retries_exceeded")
-    
-    async def diagnose_error(
-        self,
-        prompt: str,
-        temperature: float = 0.7,
-        enable_thinking: bool = True
-    ) -> dict:
-        """
-        错误诊断分析（JSON格式响应）
-        
-        Args:
-            prompt: 完整提示词
-            temperature: 采样温度
-            enable_thinking: 是否启用思考模式
-        
-        Returns:
-            包含root_cause、api_queries、keywords、example_query的字典
-        
-        Raises:
-            DeepSeekAPIError: API调用失败或JSON解析失败
-        """
-        # 与generate_code_patch逻辑完全相同，复用实现
-        return await self.generate_code_patch(prompt, temperature, enable_thinking)
