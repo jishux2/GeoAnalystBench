@@ -1,57 +1,51 @@
 """
-基于子进程的PDB程序化控制器
-支持预防性调试和事后调试两种模式
+PDB会话控制器
+封装与PDB子进程的交互逻辑
 """
 
-import sys
 import subprocess
-import os
-import tempfile
 import threading
 import queue
-import time
-from typing import List, Optional
+import os
+from typing import Optional, List, Tuple
 from pathlib import Path
 
 
-class SubprocessPdbController:
-    """统一的PDB子进程控制器"""
+class PdbSessionController:
+    """PDB会话控制器"""
     
     PDB_PROMPT = '(Pdb) '
+    READ_TIMEOUT = 30
     
-    @classmethod
-    def start_proactive(
-        cls,
-        script_path: str,
-        cwd: Optional[str] = None,
-        interpreter: Optional[str] = None  # ← 新增参数
-    ) -> 'SubprocessPdbController':
+    def __init__(
+        self,
+        process: subprocess.Popen,
+        initial_output: str = ""
+    ):
         """
-        启动预防性调试会话
+        初始化控制器
         
         Args:
-            script_path: 要调试的Python脚本路径
-            cwd: 工作目录
-            interpreter: Python解释器路径，默认使用sys.executable
-        
-        Returns:
-            已初始化的控制器实例
+            process: PDB子进程
+            initial_output: 启动时的初始输出
         """
-        python_exe = interpreter or sys.executable
-        command = [python_exe, '-m', 'pdb', script_path]
-        return cls(command, cwd, is_temp=False)
+        self._process = process
+        self.initial_output = initial_output
+        
+        self._output_queue: queue.Queue = queue.Queue()
+        self._reader_thread: Optional[threading.Thread] = None
+        
+        self._start_reader()
     
     @classmethod
-    def start_post_mortem(
+    def start_with_pdb(
         cls,
         script_path: str,
-        cwd: Optional[str] = None,
-        interpreter: Optional[str] = None  # ← 新增参数
-    ) -> 'SubprocessPdbController':
+        cwd: str,
+        interpreter: str
+    ) -> 'PdbSessionController':
         """
-        启动事后调试会话
-        
-        在脚本中注入异常钩子，发生未捕获异常时启动PDB
+        以PDB模式启动脚本（单步调试）
         
         Args:
             script_path: 脚本路径
@@ -59,82 +53,177 @@ class SubprocessPdbController:
             interpreter: Python解释器路径
         
         Returns:
-            已初始化的控制器实例
+            初始化完成的控制器实例
         """
-        with open(script_path, 'r', encoding='utf-8') as f:
-            original_code = f.read()
+        command = [interpreter, '-m', 'pdb', script_path]
         
-        hook_code = """
-import sys, pdb, traceback
-def _pdb_excepthook(exc_type, exc_value, tb):
-    traceback.print_exception(exc_type, exc_value, tb)
-    pdb.post_mortem(tb)
-sys.excepthook = _pdb_excepthook
-"""
+        process = cls._create_process(command, cwd)
+        controller = cls(process)
         
-        injected_script = f"{hook_code}\ndef main():\n"
-        injected_script += "".join([f"    {line}\n" for line in original_code.splitlines()])
-        injected_script += "\nif __name__ == '__main__':\n    main()\n"
+        controller.initial_output, _ = controller._read_until_prompt()
         
-        temp_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.py', encoding='utf-8')
-        temp_file.write(injected_script)
-        temp_file.close()
-        
-        python_exe = interpreter or sys.executable
-        command = [python_exe, temp_file.name]
-        return cls(command, cwd, is_temp=True, temp_path=temp_file.name)
+        return controller
     
-    def __init__(self, command: List[str], cwd: Optional[str], is_temp: bool = False, temp_path: Optional[str] = None):
+    @classmethod
+    def start_script(
+        cls,
+        script_path: str,
+        cwd: str,
+        interpreter: str
+    ) -> 'PdbSessionController':
         """
-        初始化PDB子进程和通信机制
+        直接启动脚本（用于事后调试，脚本需自带钩子）
         
         Args:
-            command: 启动命令
+            script_path: 脚本路径
             cwd: 工作目录
-            is_temp: 是否使用临时文件
-            temp_path: 临时文件路径
+            interpreter: Python解释器路径
+        
+        Returns:
+            初始化完成的控制器实例
         """
-        self._command = command
-        self._cwd = cwd
-        self._is_temp = is_temp
-        self._temp_path = temp_path
+        command = [interpreter, script_path]
         
-        self._output_queue = queue.Queue()
-        self._process = None
-        self._reader_thread = None
+        process = cls._create_process(command, cwd)
+        controller = cls(process)
         
-        self._start_process()
+        controller.initial_output, _ = controller._read_until_prompt()
+        
+        return controller
     
-    def _start_process(self):
-        """启动子进程并初始化通信线程"""
+    @classmethod
+    def _create_process(cls, command: List[str], cwd: str) -> subprocess.Popen:
+        """创建子进程"""
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        
+        return subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            env=env,
+            cwd=cwd,
+            bufsize=1
+        )
+    
+    def send_command(self, command: str) -> str:
+        """
+        发送PDB命令并获取响应
+        
+        Args:
+            command: PDB命令
+        
+        Returns:
+            命令执行结果
+        """
+        if self._process.poll() is not None:
+            return "[SESSION_TERMINATED] The debugging session has ended."
+        
         try:
-            child_env = os.environ.copy()
-            child_env["PYTHONUTF8"] = "1"
-            
-            self._process = subprocess.Popen(
-                self._command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                env=child_env,
-                cwd=self._cwd,
-                bufsize=1
-            )
-            
-            self._reader_thread = threading.Thread(target=self._reader_thread_func, daemon=True)
-            self._reader_thread.start()
-            
-            self.initial_output = self._read_until_prompt()
-            
-        except Exception as e:
-            self.close()
-            raise RuntimeError(f"启动PDB子进程失败: {e}")
+            self._process.stdin.write(command + '\n')
+            self._process.stdin.flush()
+        except (OSError, BrokenPipeError) as e:
+            return f"[ERROR] Communication failed: {e}"
+        
+        response, is_alive = self._read_until_prompt()
+        
+        if not is_alive:
+            if response:
+                return response + "\n[SESSION_TERMINATED]"
+            return "[SESSION_TERMINATED]"
+        
+        return response
     
-    def _reader_thread_func(self):
-        """后台线程持续读取子进程输出"""
-        while self._process and self._process.stdout:
+    def execute_code(self, code: str) -> str:
+        """
+        在当前上下文执行Python代码
+        
+        Args:
+            code: Python代码
+        
+        Returns:
+            执行结果
+        """
+        escaped_code = repr(code)
+        command = f"!exec({escaped_code})"
+        return self.send_command(command)
+    
+    def set_breakpoint_by_context(self, target_code: str) -> str:
+        """
+        基于代码上下文设置断点
+        
+        Args:
+            target_code: 目标代码片段
+        
+        Returns:
+            设置结果
+        """
+        list_output = self.send_command('ll')
+        
+        normalized_target = self._normalize_whitespace(target_code)
+        
+        for line in list_output.split('\n'):
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            
+            line_num_str = parts[0].lstrip(' ').rstrip('>')
+            
+            try:
+                line_num = int(line_num_str)
+                code_part = parts[1] if len(parts) > 1 else ''
+                
+                if normalized_target in self._normalize_whitespace(code_part):
+                    return self.send_command(f'b {line_num}')
+            
+            except ValueError:
+                continue
+        
+        return "[NOT_FOUND] Could not locate the target code in current context."
+    
+    def close(self):
+        """
+        关闭会话并清理资源
+        
+        处理嵌套会话：预防性调试中触发异常会进入事后调试模式，
+        需要连续发送退出命令才能完全终止进程
+        """
+        if self._process and self._process.poll() is None:
+            for _ in range(2):
+                try:
+                    self._process.stdin.write('q\n')
+                    self._process.stdin.flush()
+                    self._process.wait(timeout=0.5)
+                    break
+                except (OSError, BrokenPipeError):
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            
+            if self._process.poll() is None:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+        
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=1)
+    
+    def _start_reader(self):
+        """启动后台读取线程"""
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop,
+            daemon=True
+        )
+        self._reader_thread.start()
+    
+    def _reader_loop(self):
+        """后台持续读取子进程输出"""
+        while self._process.poll() is None:
             try:
                 char = self._process.stdout.read(1)
                 if char:
@@ -144,130 +233,40 @@ sys.excepthook = _pdb_excepthook
             except:
                 break
     
-    def _read_until_prompt(self) -> str:
-        """读取输出直到遇到PDB提示符"""
-        output = []
+    def _read_until_prompt(self) -> Tuple[str, bool]:
+        """
+        读取输出直到遇到PDB提示符或检测到会话终止
+        
+        采用观测型轮询：以短间隔交替检查输出队列与读取线程状态，
+        在会话终止时立即返回，规避无效的阻塞等待
+        
+        Returns:
+            元组(响应内容, 会话是否存活)
+        """
+        buffer = []
+        
         while True:
+            if not self._reader_thread.is_alive():
+                # 线程已退出，排空队列后返回
+                while True:
+                    try:
+                        buffer.append(self._output_queue.get_nowait())
+                    except queue.Empty:
+                        break
+                return ''.join(buffer).strip(), False
+            
             try:
-                char = self._output_queue.get(timeout=10)
-                output.append(char)
-                if "".join(output).endswith(self.PDB_PROMPT):
-                    break
+                char = self._output_queue.get(timeout=0.05)
+                buffer.append(char)
+                
+                current = ''.join(buffer)
+                if current.endswith(self.PDB_PROMPT):
+                    return current[:-len(self.PDB_PROMPT)].strip(), True
+            
             except queue.Empty:
-                if self._process.poll() is not None:
-                    return "".join(output).strip()
-                raise TimeoutError("未在10秒内收到PDB响应")
-        
-        full_output = "".join(output)
-        return full_output.removesuffix(self.PDB_PROMPT).strip()
-    
-    def send_command(self, command: str) -> str:
-        """
-        发送单条命令并获取响应
-        
-        Args:
-            command: PDB命令
-        
-        Returns:
-            命令执行结果
-        """
-        if self._process.poll() is not None:
-            return "[ERROR] Session terminated"
-        
-        try:
-            self._process.stdin.write(command + '\n')
-            self._process.stdin.flush()
-        except (OSError, BrokenPipeError) as e:
-            return f"[ERROR] Pipe broken: {e}"
-        
-        response = self._read_until_prompt()
-        return response
-    
-    def send_commands(self, commands: str) -> List[str]:
-        """
-        发送多条命令
-        
-        Args:
-            commands: 换行分隔的命令列表
-        
-        Returns:
-            所有响应的列表
-        """
-        command_list = [cmd.strip() for cmd in commands.strip().split('\n') if cmd.strip()]
-        responses = []
-        
-        for cmd in command_list:
-            response = self.send_command(cmd)
-            responses.append(response)
-            if "[ERROR]" in response or self._process.poll() is not None:
-                break
-        
-        return responses
-    
-    def execute_code_block(self, code_block: str) -> str:
-        """
-        在当前上下文中执行代码块
-        
-        Args:
-            code_block: 多行Python代码
-        
-        Returns:
-            执行结果
-        """
-        command = f"!exec({repr(code_block)})"
-        return self.send_command(command)
-    
-    def set_breakpoint_by_context(self, target_code: str) -> str:
-        """
-        基于代码上下文设置断点
-        
-        Args:
-            target_code: 目标代码片段（包含上下文）
-        
-        Returns:
-            断点设置结果
-        """
-        normalized_target = self._normalize_code(target_code)
-        
-        list_output = self.send_command('l')
-        
-        lines = list_output.split('\n')
-        for line in lines:
-            parts = line.split(None, 1)
-            if len(parts) < 2:
                 continue
-            
-            try:
-                line_num = int(parts[0].strip('->*'))
-                code = parts[1] if len(parts) > 1 else ''
-                
-                normalized_code = self._normalize_code(code)
-                
-                if normalized_target in normalized_code:
-                    return self.send_command(f'b {line_num}')
-            
-            except (ValueError, IndexError):
-                continue
-        
-        return "[ERROR] Target code not found in current context"
     
     @staticmethod
-    def _normalize_code(code: str) -> str:
-        """标准化代码以忽略缩进差异"""
-        return ''.join(code.split())
-    
-    def close(self):
-        """关闭调试会话并清理资源"""
-        if self._process and self._process.poll() is None:
-            try:
-                self._process.stdin.write('q\n')
-                self._process.stdin.flush()
-                self._process.wait(timeout=2)
-            except:
-                self._process.terminate()
-        
-        if self._reader_thread and self._reader_thread.is_alive():
-            self._reader_thread.join(timeout=1)
-        
-        if self._is_temp and self._temp_path and os.path.exists(self._temp_path):
-            os.remove(self._temp_path)
+    def _normalize_whitespace(text: str) -> str:
+        """标准化空白字符以便匹配"""
+        return ''.join(text.split())
