@@ -34,20 +34,11 @@ class DialogueManager:
         task_id: int,
         initial_prompt: Dict[str, str],
         max_rounds: int = 3,
-        categories: List[str] = None,  # 新增
-        is_opensource: bool = True     # 新增
+        categories: List[str] = None,
+        is_opensource: bool = True
     ):
-        """
-        初始化对话历史
-        
-        Args:
-            task_id: 任务编号
-            initial_prompt: 首轮提示词，包含task/instruction/domain_knowledge/dataset等字段
-            max_rounds: 最大迭代轮次
-        """
+        """初始化对话历史"""
         history_path = self._get_history_path(task_id)
-        
-        # 确保任务目录存在
         history_path.parent.mkdir(parents=True, exist_ok=True)
         
         history = {
@@ -57,11 +48,12 @@ class DialogueManager:
             "status": "pending",
             "created_at": datetime.now().isoformat(),
             
-            # 新增元数据区段
             "metadata": {
                 "categories": categories or [],
                 "is_opensource": is_opensource
             },
+            
+            "diagnosis": None,  # 任务级诊断
             
             "rounds": [
                 {
@@ -69,14 +61,8 @@ class DialogueManager:
                     "prompt": initial_prompt,
                     "generated_code": None,
                     "execution": {
-                        "status": "pending",
-                        "duration": None,          # 新增：执行耗时（秒）
-                        "error_type": None,        # 新增：错误类型
-                        "error_message": None,     # 新增：错误描述
-                        "error_trace": None,       # 仅运行时失效时填充
-                        "call_details": None       # 仅运行时失效时填充
-                    },
-                    "diagnosis": None
+                        "status": "pending"
+                    }
                 }
             ]
         }
@@ -150,9 +136,7 @@ class DialogueManager:
     def add_round(
         self,
         task_id: int,
-        round_num: int,
-        retrieved_docs: Optional[List[Dict]] = None,
-        retrieved_examples: Optional[List[Dict]] = None
+        round_num: int
     ):
         """
         添加新轮次记录
@@ -160,30 +144,21 @@ class DialogueManager:
         Args:
             task_id: 任务编号
             round_num: 新轮次编号
-            retrieved_docs: 检索到的API文档
-            retrieved_examples: 检索到的代码示例
         """
         history = self.get_history(task_id)
         
         if not history:
             raise ValueError(f"任务{task_id}的对话历史不存在")
         
-        # 检查轮次是否已存在
         existing_rounds = [r['round'] for r in history['rounds']]
         if round_num in existing_rounds:
-            raise ValueError(f"第{round_num}轮记录已存在，请使用update_round更新")
+            raise ValueError(f"第{round_num}轮记录已存在")
         
         new_round = {
             "round": round_num,
-            "retrieved_docs": retrieved_docs or [],
-            "retrieved_examples": retrieved_examples or [],
-            "generated_patch": None,
             "execution": {
-                "status": "pending",
-                "error_trace": None,
-                "call_details": None
-            },
-            "diagnosis": None
+                "status": "pending"
+            }
         }
         
         history['rounds'].append(new_round)
@@ -192,6 +167,28 @@ class DialogueManager:
         
         self._save_history(task_id, history)
     
+# ============================================================
+# 任务级状态更新
+# ============================================================
+
+    def update_diagnosis(self, task_id: int, diagnosis: Dict):
+        """
+        更新任务级诊断
+        
+        Args:
+            task_id: 任务编号
+            diagnosis: 诊断信息，包含root_cause和patches
+        """
+        history = self.get_history(task_id)
+        
+        if not history:
+            raise ValueError(f"任务{task_id}的对话历史不存在")
+        
+        history['diagnosis'] = diagnosis
+        history['updated_at'] = datetime.now().isoformat()
+        
+        self._save_history(task_id, history)
+
     def mark_success(self, task_id: int):
         """标记任务执行成功"""
         history = self.get_history(task_id)
@@ -324,32 +321,39 @@ class DialogueManager:
         
         return sorted(pending)
     
-    def get_tasks_by_status(self, status: str) -> List[int]:
+    def get_tasks_by_status(self, status: str, scope: Optional[List[int]] = None) -> List[int]:
         """
         按状态筛选任务
         
         Args:
             status: pending/success/failed
+            scope: 限定扫描范围，为None时扫描全部
         
         Returns:
             任务ID列表
         """
         tasks = []
         
-        if not self.workspace_root.exists():
-            return tasks
-        
-        for task_dir in self.workspace_root.iterdir():
-            if not task_dir.is_dir():
-                continue
-            
-            try:
-                task_id = int(task_dir.name)
+        if scope is not None:
+            for task_id in scope:
                 history = self.get_history(task_id)
-                
                 if history and history['status'] == status:
                     tasks.append(task_id)
-            except (ValueError, KeyError):
-                continue
+        else:
+            if not self.workspace_root.exists():
+                return tasks
+            
+            for task_dir in self.workspace_root.iterdir():
+                if not task_dir.is_dir():
+                    continue
+                
+                try:
+                    task_id = int(task_dir.name)
+                    history = self.get_history(task_id)
+                    
+                    if history and history['status'] == status:
+                        tasks.append(task_id)
+                except (ValueError, KeyError):
+                    continue
         
         return sorted(tasks)
