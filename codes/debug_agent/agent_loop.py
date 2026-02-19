@@ -3,63 +3,96 @@ Debug Agent核心循环
 """
 
 import json
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, Optional
-from .tools import DebugTools
+from typing import Dict, List, Optional, Any
+from datetime import datetime
+
+from .tools import DebugToolkit
+from .prompts import build_system_prompt, build_initial_user_message, format_code_with_line_numbers
 from .trace_logger import TraceLogger
 
 
 class DebugAgent:
-    """基于工具调用的调试智能体"""
+    """调试智能体"""
     
     def __init__(
         self,
         api_key: str,
-        script_path: str,
-        cwd: str,
-        interpreter: str,  # ← 新增参数
-        error_context: Dict,
+        script_content: str,
+        working_dir: str,
+        interpreter: str,
         output_dir: Path,
+        current_diagnosis: Optional[Dict] = None,  # 改为任务级诊断
+        error_summary: Optional[str] = None,        # 新增：上次执行的错误概要
+        debug_mode: str = "crash",
         max_turns: int = 20,
-        temperature: float = 0.7
+        temperature: float = 0.7,
+        executor: Optional[ProcessPoolExecutor] = None
     ):
         """
-        初始化Debug Agent
+        初始化智能体
         
         Args:
             api_key: DeepSeek API密钥
-            script_path: 待调试脚本路径
-            cwd: 工作目录
+            script_content: 原始代码（第1轮生成的纯净代码）
+            working_dir: 工作目录
             interpreter: Python解释器路径
-            error_context: 错误上下文
             output_dir: 输出目录
+            current_diagnosis: 任务级诊断（包含root_cause和patches）
+            error_summary: 上次执行的错误概要
+            debug_mode: 调试模式
             max_turns: 最大交互轮次
             temperature: 采样温度
+            executor: 进程池引用
         """
         self.api_key = api_key
-        self.script_path = script_path
-        self.cwd = cwd
-        self.error_context = error_context
+        self.script_content = script_content
+        self.working_dir = working_dir
+        self.interpreter = interpreter
+        self.output_dir = Path(output_dir)
+        self.current_diagnosis = current_diagnosis
+        self.error_summary = error_summary
+        self.debug_mode = debug_mode
         self.max_turns = max_turns
         self.temperature = temperature
         
-        self.tools = DebugTools(script_path, cwd, interpreter)  # ← 传递解释器
-        self.logger = TraceLogger(output_dir / "debug_trace.json")
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        self.messages = []
+        self.toolkit = DebugToolkit(
+            script_content=script_content,
+            working_dir=working_dir,
+            interpreter=interpreter,
+            output_dir=self.output_dir,
+            executor=executor  # 传递进程池
+        )
+        
+        self.logger = TraceLogger(self.output_dir / "debug_trace.json")
+        
+        self.messages: List[Dict] = []
         self.turn_count = 0
-        self.final_diagnosis = None
+        self.final_result: Optional[Dict] = None
     
-    async def run(self) -> Dict:
+    async def run(self) -> Dict[str, Any]:
         """
-        运行Agent循环
+        运行智能体循环
         
         Returns:
-            最终诊断结果
+            最终结果，包含：
+            - success: 是否成功
+            - diagnosis: 诊断信息（如失败）
+            - patches: 修复补丁列表（如失败）
         """
         from deepseek.deepseek_client import DeepSeekClient
         
         self._initialize_messages()
+        
+        # 开发阶段：保存初始提示词
+        prompt_path = self.output_dir / "initial_prompt.md"
+        prompt_path.write_text(
+            '\n\n---\n\n'.join(msg.get('content', '') for msg in self.messages),
+            encoding='utf-8'
+        )
         
         async with DeepSeekClient(self.api_key) as client:
             while self.turn_count < self.max_turns:
@@ -67,170 +100,94 @@ class DebugAgent:
                 
                 response_data = await client.chat_completion_with_tools(
                     messages=self.messages,
-                    tools=self.tools.get_tool_definitions(),
+                    tools=self.toolkit.get_tool_definitions(),
                     temperature=self.temperature,
                     max_tokens=8192,
                     thinking={"type": "enabled"}
                 )
                 
                 message = response_data["choices"][0]["message"]
-                
-                reasoning = message.get("reasoning_content")
-                content = message.get("content")
                 tool_calls = message.get("tool_calls")
                 
-                # 构建完整的assistant消息（保留reasoning_content）
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": content or ""  # content不能为None
-                }
+                self.messages.append(message)
                 
-                # 如果有思考内容，必须保留
-                if reasoning:
-                    assistant_msg["reasoning_content"] = reasoning
-                
-                # 如果有工具调用，添加到消息中
-                if tool_calls:
-                    assistant_msg["tool_calls"] = tool_calls
-                
-                self.messages.append(assistant_msg)
-                
-                # 如果没有工具调用，循环结束
                 if not tool_calls:
                     self.logger.log_turn(
-                        self.turn_count,
-                        reasoning,
-                        None,
-                        None,
-                        content
+                        turn_num=self.turn_count,
+                        reasoning=message.get("reasoning_content"),
+                        tool_calls=None,
+                        tool_results=None,
+                        response_text=message.get("content")
                     )
+                    
+                    print(f"[Turn {self.turn_count}] No tool calls - unexpected termination")
                     break
                 
-                # 执行工具调用
                 tool_results = []
-                diagnosis_complete = False
+                should_terminate = False
                 
                 for tool_call in tool_calls:
                     tool_name = tool_call["function"]["name"]
                     arguments = json.loads(tool_call["function"]["arguments"])
                     
-                    if tool_name == "finalize_diagnosis":
-                        self.final_diagnosis = arguments
-                        diagnosis_complete = True
-                        result = "[DIAGNOSIS_COMPLETE]"
-                    else:
-                        result = self.tools.execute_tool(tool_name, arguments)
-                    
+                    result = await self.toolkit.execute_tool(tool_name, arguments)
                     tool_results.append(result)
                     
                     self.messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
-                        "content": result
+                        "content": result.get("result", "")
                     })
+                    
+                    if result.get("final"):
+                        should_terminate = True
+                        
+                        if tool_name == "finalize_success":
+                            self.final_result = {"success": True}
+                        
+                        elif tool_name == "finalize_with_patch":
+                            self.final_result = {
+                                "success": False,
+                                **result.get("diagnosis", {})
+                            }
                 
                 self.logger.log_turn(
-                    self.turn_count,
-                    reasoning,
-                    tool_calls,
-                    tool_results,
-                    content
+                    turn_num=self.turn_count,
+                    reasoning=message.get("reasoning_content"),
+                    tool_calls=tool_calls,
+                    tool_results=[r.get("result", "") for r in tool_results],
+                    response_text=message.get("content")
                 )
                 
-                if diagnosis_complete:
+                if should_terminate:
                     break
         
-        self.tools.cleanup()
+        self.toolkit.cleanup()
         
-        if not self.final_diagnosis:
-            self.final_diagnosis = {
-                "root_cause": "Agent terminated without providing diagnosis",
-                "repair_plan": "Unable to generate repair plan"
+        if self.final_result is None:
+            self.final_result = {
+                "success": False,
+                "root_cause": "Agent terminated without providing a conclusion",
+                "patches": []
             }
         
-        self.logger.finalize(self.final_diagnosis)
+        self.logger.finalize(self.final_result)
         
-        return self.final_diagnosis
+        return self.final_result
     
     def _initialize_messages(self):
-        """构建初始系统提示词"""
-        system_prompt = self._build_system_prompt()
+        """构建初始消息序列"""
+        system_prompt = build_system_prompt(self.debug_mode)
+        
+        code_with_lines = format_code_with_line_numbers(self.script_content)
+        
+        user_message = build_initial_user_message(
+            current_code=code_with_lines,
+            current_diagnosis=self.current_diagnosis,  # 改为任务级诊断
+            error_summary=self.error_summary
+        )
         
         self.messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": self._format_error_context()}
+            {"role": "user", "content": user_message}
         ]
-
-        print(self._format_error_context())
-    
-    def _build_system_prompt(self) -> str:
-        """构建系统提示词"""
-        return """You are an expert debugging agent. Your task is to diagnose code errors through interactive debugging.
-
-Available debugging modes:
-- **Proactive debugging**: Step through code from the beginning to identify issues
-- **Post-mortem debugging**: Analyze the state when an exception occurred
-
-PDB command reference:
-- `n` (next): Execute current line, stop at next line
-- `s` (step): Step into function calls
-- `c` (continue): Continue execution until next breakpoint
-- `l` (list): Show current code context
-- `w` (where): Print stack trace
-- `p <expr>`: Print expression value
-- `!<code>`: Execute arbitrary Python code
-
-Debugging workflow:
-1. Review the error context provided
-2. Decide which debugging mode to use
-3. Use PDB commands or code injection to explore the runtime state
-4. Identify the root cause through systematic investigation
-5. Call `finalize_diagnosis` with a detailed repair plan
-
-Important guidelines:
-- Provide actionable repair instructions, not just error descriptions
-- Include specific code changes needed
-- Be thorough but efficient with debugging steps
-"""
-    
-    def _format_error_context(self) -> str:
-        """格式化错误上下文"""
-        sections = ["=== Error Context ===\n"]
-        
-        error_trace = self.error_context.get("error_trace", {})
-        sections.append(f"Error Type: {error_trace.get('error_type', 'Unknown')}")
-        sections.append(f"Error Message: {error_trace.get('error_message', '')}\n")
-        
-        if error_trace.get("stack_frames"):
-            sections.append("Stack Trace:")
-            for frame in error_trace["stack_frames"]:
-                sections.append(f"\nFile: {frame.get('file', 'unknown')}, Line {frame.get('line', '?')}")
-                sections.append(f"Function: {frame.get('function', 'unknown')}")
-                sections.append(f"Code: {frame.get('code', '')}")
-                
-                if frame.get("locals"):
-                    sections.append("Local Variables:")
-                    sections.append(json.dumps(frame["locals"], indent=2, ensure_ascii=False))
-        
-        call_details = self.error_context.get("call_details", [])
-        if call_details:
-            sections.append("\n=== Function Call Details ===")
-            for detail in call_details:
-                sections.append(f"\nFunction: {detail.get('function', 'unknown')}")
-                sections.append(f"Error: {detail.get('error', '')}")
-                sections.append(json.dumps({
-                    'args': detail.get('args_summary', []),
-                    'kwargs': detail.get('kwargs_summary', {})
-                }, indent=2, ensure_ascii=False))
-        
-        return "\n".join(sections)
-    
-    @staticmethod
-    def _extract_reasoning(response: str) -> Optional[str]:
-        """从响应中提取思考内容（如果存在）"""
-        return None
-    
-    @staticmethod
-    def _extract_tool_calls(response: str) -> Optional[list]:
-        """从响应中提取工具调用"""
-        return None
