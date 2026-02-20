@@ -379,22 +379,24 @@ class DebugToolkit:
         return result
     
     async def _execute_with_tracing(self, args: Dict) -> Dict[str, Any]:
-        """带跟踪的执行"""
         injected_code = self._inject_tracing(self.script_content)
+        
+        relative_output = str(Path(self.output_dir).relative_to(self.working_dir))
         
         result = await self._execute_script_async(
             injected_code,
-            env_extras={'EVAL_OUTPUT_DIR': str(self.output_dir)},
+            env_extras={'EVAL_OUTPUT_DIR': relative_output},
             label="tracing"
         )
         
         success = result["returncode"] == 0
         output = result["stdout"] + result["stderr"]
         
-        trace_file = self.output_dir / "error_trace.json"
         trace_hint = ""
+        trace_file = Path(self.output_dir) / "error_trace.json"
         if trace_file.exists():
-            trace_hint = f"\n\nError trace saved to: {trace_file}"
+            relative_trace = str(Path(relative_output) / "error_trace.json")
+            trace_hint = f"\n\nError trace saved to: {relative_trace}"
         
         return {
             "success": success,
@@ -610,7 +612,10 @@ class DebugToolkit:
         for patch in patches:
             indent_level = patch.get("indent_level", 0)
             processed_patches.append({
-                "target_code": patch["target_code"],
+                "target_code": self._apply_indent_level(
+                    patch["target_code"],
+                    indent_level
+                ),
                 "replacement_code": self._apply_indent_level(
                     patch["replacement_code"],
                     indent_level
