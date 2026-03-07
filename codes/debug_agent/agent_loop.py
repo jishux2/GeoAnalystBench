@@ -162,7 +162,7 @@ class DebugAgent:
                 if should_terminate:
                     break
         
-        self.toolkit.cleanup()
+        await self.toolkit.cleanup()
         
         if self.final_result is None:
             self.final_result = {

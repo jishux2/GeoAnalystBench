@@ -214,23 +214,6 @@ class DebugToolkit:
             {
                 "type": "function",
                 "function": {
-                    "name": "set_breakpoint",
-                    "description": "Set a breakpoint by matching code context. More robust than line numbers.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "target_code": {
-                                "type": "string",
-                                "description": "Code snippet to match (whitespace-normalized)"
-                            }
-                        },
-                        "required": ["target_code"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
                     "name": "close_debug_session",
                     "description": "Close the active PDB session and clean up resources.",
                     "parameters": {
@@ -323,7 +306,6 @@ class DebugToolkit:
             "read_file": self._read_file,
             "execute_pdb_command": self._execute_pdb_command,
             "inject_code_block": self._inject_code_block,
-            "set_breakpoint": self._set_breakpoint,
             "close_debug_session": self._close_debug_session,
             "finalize_success": self._finalize_success,
             "finalize_with_patch": self._finalize_with_patch,
@@ -480,7 +462,7 @@ class DebugToolkit:
         )
         
         try:
-            self._pdb_session = PdbSessionController.start_script(
+            self._pdb_session = await PdbSessionController.start_script(
                 str(script_path),
                 self.working_dir,
                 self.interpreter
@@ -502,7 +484,7 @@ class DebugToolkit:
         script_path = self._create_temp_script(self.script_content)
         
         try:
-            self._pdb_session = PdbSessionController.start_with_pdb(
+            self._pdb_session = await PdbSessionController.start_with_pdb(
                 str(script_path),
                 self.working_dir,
                 self.interpreter
@@ -546,7 +528,7 @@ class DebugToolkit:
         if not command:
             return {"success": False, "result": "command is required"}
         
-        response = self._pdb_session.send_command(command)
+        response = await self._pdb_session.send_command(command)
         return {"success": True, "result": response}
     
     async def _inject_code_block(self, args: Dict) -> Dict[str, Any]:
@@ -559,19 +541,7 @@ class DebugToolkit:
         if not code:
             return {"success": False, "result": "code is required"}
         
-        response = self._pdb_session.execute_code(code)
-        return {"success": True, "result": response}
-    
-    async def _set_breakpoint(self, args: Dict) -> Dict[str, Any]:
-        """设置断点"""
-        if self._pdb_session is None:
-            return {"success": False, "result": "No active debug session"}
-        
-        target_code = args.get("target_code", "")
-        if not target_code:
-            return {"success": False, "result": "target_code is required"}
-        
-        response = self._pdb_session.set_breakpoint_by_context(target_code)
+        response = await self._pdb_session.execute_code(code)
         return {"success": True, "result": response}
     
     async def _close_debug_session(self, args: Dict) -> Dict[str, Any]:
@@ -579,7 +549,7 @@ class DebugToolkit:
         if self._pdb_session is None:
             return {"success": False, "result": "No active debug session"}
         
-        self._pdb_session.close()
+        await self._pdb_session.close()
         self._pdb_session = None
         
         return {"success": True, "result": "Debug session closed"}
@@ -636,16 +606,16 @@ class DebugToolkit:
     # 辅助方法
     # ============================================================
     
-    def cleanup(self):
+    async def cleanup(self):
         """清理资源"""
         if self._pdb_session is not None:
-            self._pdb_session.close()
+            await self._pdb_session.close()
             self._pdb_session = None
         
         for temp_file in self._temp_files:
             try:
                 temp_file.unlink()
-            except:
+            except OSError:
                 pass
         
         self._temp_files.clear()
