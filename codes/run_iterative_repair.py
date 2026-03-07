@@ -65,6 +65,12 @@ def main():
     try:
         asyncio.run(orchestrator.run(task_ids))
         print("\n迭代修复完成！")
+        
+        # 生成汇总报告
+        from evaluator.summary_reporter import SummaryReporter
+        reporter = SummaryReporter()
+        report = reporter.generate()
+        print("汇总报告已生成：results/evaluation_report.md")
     
     except KeyboardInterrupt:
         print("\n\n修复流程被用户中断")

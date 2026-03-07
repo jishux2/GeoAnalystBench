@@ -213,16 +213,6 @@ class IterativeRepairOrchestrator:
             for tid in task_ids
         ]
         await asyncio.gather(*agent_tasks)
-        
-        failed_tasks = [
-            tid for tid in task_ids
-            if self.dialogue_mgr.get_history(tid)['status'] == 'pending'
-        ]
-        
-        if failed_tasks and round_num >= self.max_rounds:
-            print(f"\n达到最大轮次，标记{len(failed_tasks)}个任务为失败")
-            for task_id in failed_tasks:
-                self.dialogue_mgr.mark_failed(task_id, reason="max_rounds_reached")
     
     async def _generate_initial_code(self, engine, task_id: int):
         """
@@ -307,7 +297,7 @@ class IterativeRepairOrchestrator:
             )
             
             result = await agent.run()
-            
+
             if result.get('success'):
                 self.dialogue_mgr.update_round(
                     task_id,
@@ -316,23 +306,46 @@ class IterativeRepairOrchestrator:
                 )
                 self.dialogue_mgr.mark_success(task_id)
                 print(f"  ✓ 任务{task_id}执行成功")
-            
+
             else:
                 diagnosis = {
                     'root_cause': result.get('root_cause', ''),
                     'patches': result.get('patches', [])
                 }
-                
+
                 self.dialogue_mgr.update_diagnosis(task_id, diagnosis)
                 self.dialogue_mgr.update_round(
                     task_id,
                     round_num,
                     execution={'status': 'diagnosed'}
                 )
-                
-                root_cause_preview = diagnosis['root_cause'][:60] + '...' if len(diagnosis['root_cause']) > 60 else diagnosis['root_cause']
-                print(f"  ✗ 任务{task_id}诊断完成：{root_cause_preview}")
-        
+
+                if round_num >= self.max_rounds:
+                    self.dialogue_mgr.mark_failed(task_id, reason="max_rounds_reached")
+                    print(f"  ✗ 任务{task_id}达到最大轮次，标记为失败")
+                else:
+                    root_cause_preview = diagnosis['root_cause'][:60] + '...' if len(diagnosis['root_cause']) > 60 else diagnosis['root_cause']
+                    print(f"  ✗ 任务{task_id}诊断完成：{root_cause_preview}")
+
+            # 任务终态确定后触发评估
+            history = self.dialogue_mgr.get_history(task_id)
+            if history and history['status'] in ('success', 'failed'):
+                try:
+                    from evaluator.task_evaluator import TaskEvaluator
+                    from deepseek.deepseek_client import DeepSeekClient
+                    
+                    evaluator = TaskEvaluator(self.workspace_root)
+
+                    async with DeepSeekClient(self.api_key) as eval_client:
+                        await evaluator.evaluate(
+                            task_id=task_id,
+                            api_client=eval_client,
+                            temperature=0.3
+                        )
+                    print(f"  📊 任务{task_id}评估完成")
+                except Exception as e:
+                    print(f"  ⚠ 任务{task_id}评估失败：{e}")
+
         except Exception as e:
             print(f"  ✗ 任务{task_id}智能体异常：{e}")
             self.dialogue_mgr.update_round(
