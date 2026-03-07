@@ -15,6 +15,42 @@ from typing import Dict, List, Optional, Any
 from .pdb_controller import PdbSessionController
 
 
+def _run_command_sync(
+    command: list,
+    cwd: str,
+    env: Dict[str, str],
+    timeout: int = 120
+) -> Dict[str, Any]:
+    """
+    同步执行任意命令（供进程池调用）
+    """
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "returncode": -1,
+            "stdout": "",
+            "stderr": f"Execution timed out (>{timeout}s)"
+        }
+    except Exception as e:
+        return {
+            "returncode": -1,
+            "stdout": "",
+            "stderr": str(e)
+        }
+
 def _run_script_sync(
     interpreter: str,
     script_path: str,
@@ -24,38 +60,15 @@ def _run_script_sync(
 ) -> Dict[str, Any]:
     """
     同步执行脚本（供进程池调用）
-    
+
     独立于类实例，避免序列化时携带不可pickle的对象
     """
-    try:
-        result = subprocess.run(
-            [interpreter, script_path],
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-        
-        return {
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr
-        }
-    
-    except subprocess.TimeoutExpired:
-        return {
-            "returncode": -1,
-            "stdout": "",
-            "stderr": f"Execution timed out (>{timeout}s)"
-        }
-    
-    except Exception as e:
-        return {
-            "returncode": -1,
-            "stdout": "",
-            "stderr": str(e)
-        }
+    return _run_command_sync(
+        [interpreter, script_path],
+        cwd,
+        env,
+        timeout
+    )
 
 
 class DebugToolkit:
@@ -73,7 +86,7 @@ class DebugToolkit:
         初始化工具集
         
         Args:
-            script_content: 待调试的脚本内容（不含插桩）
+            script_content: 待调试的脚本内容
             working_dir: 工作目录
             interpreter: Python解释器路径
             output_dir: 输出目录
@@ -180,6 +193,32 @@ class DebugToolkit:
             {
                 "type": "function",
                 "function": {
+                    "name": "run_utility_script",
+                    "description": "Execute a lightweight Python script in the task's working directory. Accepts either inline code for ad-hoc tasks (directory listing, library version checks, data format probing) or a path to a pre-built diagnostic routine with command-line arguments. Runs in an isolated subprocess and returns combined stdout/stderr.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "description": "Python code to execute. Written from top-level without indentation constraints. Mutually exclusive with script_path."
+                            },
+                            "script_path": {
+                                "type": "string",
+                                "description": "Absolute path to a pre-built script file."
+                            },
+                            "args": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Command-line arguments forwarded to the script designated by script_path."
+                            }
+                        },
+                        "required": []
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "execute_pdb_command",
                     "description": "Execute a PDB command in the active debugging session.",
                     "parameters": {
@@ -198,7 +237,7 @@ class DebugToolkit:
                 "type": "function",
                 "function": {
                     "name": "inject_code_block",
-                    "description": "Evaluate a Python code block within an active PDB session. Requires a prior call to start_stepping_debug or execute_with_postmortem. The code runs in the session's runtime scope and does not alter the script itself.",
+                    "description": "Feed a Python code block into an active PDB session for immediate evaluation. Demands a running debugger context launched via start_stepping_debug or execute_with_postmortem. Modifications to the execution state—such as newly imported modules or reassigned variables—carry forward into all subsequent steps of the session.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -304,6 +343,7 @@ class DebugToolkit:
             "execute_with_postmortem": self._execute_with_postmortem,
             "start_stepping_debug": self._start_stepping_debug,
             "read_file": self._read_file,
+            "run_utility_script": self._run_utility_script,
             "execute_pdb_command": self._execute_pdb_command,
             "inject_code_block": self._inject_code_block,
             "close_debug_session": self._close_debug_session,
@@ -380,9 +420,15 @@ class DebugToolkit:
             relative_trace = str(Path(relative_output) / "error_trace.json")
             trace_hint = f"\n\nError trace saved to: {relative_trace}"
         
+        call_hint = ""
+        call_file = Path(self.output_dir) / "call_details.json"
+        if call_file.exists():
+            relative_call = str(Path(relative_output) / "call_details.json")
+            call_hint = f"\nFunction call details saved to: {relative_call}"
+
         return {
             "success": success,
-            "result": f"Exit code: {result['returncode']}\n\n{output}{trace_hint}"
+            "result": f"Exit code: {result['returncode']}\n\n{output}{trace_hint}{call_hint}"
         }
     
     async def _execute_with_logging(self, args: Dict) -> Dict[str, Any]:
@@ -518,6 +564,51 @@ class DebugToolkit:
         
         except Exception as e:
             return {"success": False, "result": f"Failed to read file: {e}"}
+    
+    async def _run_utility_script(self, args: Dict) -> Dict[str, Any]:
+        """执行轻量级实用脚本"""
+        code = args.get("code")
+        script_path = args.get("script_path")
+
+        if code and script_path:
+            return {"success": False, "result": "Provide either 'code' or 'script_path', not both."}
+
+        if not code and not script_path:
+            return {"success": False, "result": "One of 'code' or 'script_path' is required."}
+
+        if code:
+            temp_path = self._create_temp_script(code)
+            command = [self.interpreter, str(temp_path)]
+        else:
+            resolved = Path(script_path)
+            if not resolved.exists():
+                return {"success": False, "result": f"Script not found: {script_path}"}
+            cli_args = args.get("args", [])
+            command = [self.interpreter, str(resolved)] + cli_args
+
+        env = os.environ.copy()
+
+        if self.executor:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                self.executor,
+                _run_command_sync,
+                command,
+                self.working_dir,
+                env
+            )
+        else:
+            result = _run_command_sync(
+                command,
+                self.working_dir,
+                env
+            )
+
+        output = result["stdout"] + result["stderr"]
+        return {
+            "success": result["returncode"] == 0,
+            "result": f"Exit code: {result['returncode']}\n\n{output}" if output.strip() else f"Exit code: {result['returncode']}"
+        }
     
     async def _execute_pdb_command(self, args: Dict) -> Dict[str, Any]:
         """执行PDB命令"""
