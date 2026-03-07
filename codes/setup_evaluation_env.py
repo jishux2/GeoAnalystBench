@@ -99,7 +99,7 @@ def setup_opensource_env():
     else:
         print(f"  激活环境：source {env_path}/bin/activate")
     
-    print(f"  执行评测：python codes/run_evaluation.py")
+    print(f"  执行评测：python codes/run_iterative_repair.py")
     
     return str(python_path.absolute())
 
