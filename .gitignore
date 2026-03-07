@@ -13,6 +13,7 @@ ENV/
 
 # IDE与编辑器
 .vscode/
+.VSCodeCounter
 .idea/
 *.swp
 *.swo
@@ -24,6 +25,8 @@ temp*
 test/
 test*
 run_log*
+target.py
+target_script.py
 chats.md
 prompt.md
 
