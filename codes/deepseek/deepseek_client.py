@@ -74,75 +74,32 @@ class DeepSeekClient:
         use_prefix: bool = False
     ) -> str:
         """
-        调用对话补全API
-        
+        对话补全，返回生成的文本内容
+
         Args:
             messages: 对话消息列表
             model: 模型名称
             temperature: 采样温度
             max_tokens: 最大输出token数
             stop: 停止序列
-            thinking: 思考模式配置，如{"type": "enabled"}
-            use_prefix: 是否启用前缀续写功能
-        
+            thinking: 思考模式配置
+            use_prefix: 是否启用前缀续写（切换至Beta端点）
+
         Returns:
             模型生成的文本内容
-        
-        Raises:
-            DeepSeekAPIError: API调用失败时抛出
         """
-        # 前缀续写需要访问Beta端点，常规对话使用标准端点
-        url = f"{self.BETA_URL if use_prefix else self.BASE_URL}/chat/completions"
-        
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False
-        }
-        
-        if stop:
-            payload["stop"] = stop
-        if thinking:
-            payload["thinking"] = thinking
-        
-        # 执行带指数退避的重试策略
-        for attempt in range(self.max_retries + 1):
-            try:
-                async with self.session.post(url, json=payload) as response:
-                    response_data = await response.json()
-                    
-                    if response.status == 200:
-                        return response_data["choices"][0]["message"]["content"]
-                    
-                    # 处理错误响应
-                    error_info = response_data.get("error", {})
-                    error_msg = error_info.get("message", "未知错误")
-                    error_type = error_info.get("type", "unknown_error")
-                    
-                    # 仅对服务端临时性错误进行重试，客户端错误直接抛出
-                    if response.status in self.RETRYABLE_ERRORS and attempt < self.max_retries:
-                        wait_time = 2 ** attempt  # 2秒、4秒、8秒递增
-                        await asyncio.sleep(wait_time)
-                        continue
-                    
-                    raise DeepSeekAPIError(response.status, error_msg, error_type)
-            
-            except asyncio.TimeoutError:
-                if attempt < self.max_retries:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                raise DeepSeekAPIError(408, "请求超时", "timeout_error")
-            
-            except aiohttp.ClientError as e:
-                if attempt < self.max_retries:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                raise DeepSeekAPIError(0, f"网络错误: {str(e)}", "network_error")
-        
-        raise DeepSeekAPIError(500, "达到最大重试次数", "max_retries_exceeded")
-    
+        payload = self._build_payload(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stop=stop,
+            thinking=thinking
+        )
+
+        response_data = await self._request_with_retry(payload, use_beta=use_prefix)
+        return response_data["choices"][0]["message"]["content"]
+
     async def chat_completion_with_tools(
         self,
         messages: List[Dict[str, str]],
@@ -153,8 +110,8 @@ class DeepSeekClient:
         thinking: Optional[Dict[str, str]] = None
     ) -> Dict:
         """
-        调用支持工具调用的对话补全API，返回完整响应对象
-        
+        支持工具调用的对话补全，返回完整响应对象
+
         Args:
             messages: 对话消息列表
             tools: 工具定义列表
@@ -162,56 +119,93 @@ class DeepSeekClient:
             temperature: 采样温度
             max_tokens: 最大输出token数
             thinking: 思考模式配置
-        
+
         Returns:
             完整的API响应对象
-        
-        Raises:
-            DeepSeekAPIError: API调用失败时抛出
         """
-        url = f"{self.BASE_URL}/chat/completions"
-        
+        payload = self._build_payload(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            thinking=thinking
+        )
+
+        return await self._request_with_retry(payload, use_beta=False)
+
+    def _build_payload(
+        self,
+        messages: List[Dict[str, str]],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        stop: Optional[List[str]] = None,
+        tools: Optional[List[Dict]] = None,
+        thinking: Optional[Dict[str, str]] = None
+    ) -> Dict:
+        """组装请求体，仅包含非空字段"""
         payload = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": False,
-            "tools": tools
+            "stream": False
         }
-        
+
+        if stop:
+            payload["stop"] = stop
+        if tools:
+            payload["tools"] = tools
         if thinking:
             payload["thinking"] = thinking
-        
+
+        return payload
+
+    async def _request_with_retry(self, payload: Dict, use_beta: bool = False) -> Dict:
+        """
+        执行带指数退避的重试请求
+
+        Args:
+            payload: 请求体
+            use_beta: 是否使用Beta端点
+
+        Returns:
+            解析后的响应JSON
+
+        Raises:
+            DeepSeekAPIError: 不可恢复的API错误
+        """
+        url = f"{self.BETA_URL if use_beta else self.BASE_URL}/chat/completions"
+
         for attempt in range(self.max_retries + 1):
             try:
                 async with self.session.post(url, json=payload) as response:
                     response_data = await response.json()
-                    
+
                     if response.status == 200:
                         return response_data
-                    
+
                     error_info = response_data.get("error", {})
                     error_msg = error_info.get("message", "未知错误")
                     error_type = error_info.get("type", "unknown_error")
-                    
+
                     if response.status in self.RETRYABLE_ERRORS and attempt < self.max_retries:
-                        wait_time = 2 ** attempt
-                        await asyncio.sleep(wait_time)
+                        await asyncio.sleep(2 ** attempt)
                         continue
-                    
+
                     raise DeepSeekAPIError(response.status, error_msg, error_type)
-            
+
             except asyncio.TimeoutError:
                 if attempt < self.max_retries:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 raise DeepSeekAPIError(408, "请求超时", "timeout_error")
-            
+
             except aiohttp.ClientError as e:
                 if attempt < self.max_retries:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 raise DeepSeekAPIError(0, f"网络错误: {str(e)}", "network_error")
-        
+
         raise DeepSeekAPIError(500, "达到最大重试次数", "max_retries_exceeded")
