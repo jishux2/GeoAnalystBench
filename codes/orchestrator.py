@@ -299,7 +299,8 @@ class IterativeRepairOrchestrator:
                 output_dir=output_dir,
                 current_diagnosis=current_diagnosis,
                 error_summary=None,
-                debug_mode="crash",
+                round_num=round_num,
+                max_rounds=self.max_rounds,
                 max_turns=self.debug_max_turns,
                 temperature=self.temperature,
                 executor=self.executor

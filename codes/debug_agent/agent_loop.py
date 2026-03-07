@@ -23,9 +23,10 @@ class DebugAgent:
         working_dir: str,
         interpreter: str,
         output_dir: Path,
-        current_diagnosis: Optional[Dict] = None,  # 改为任务级诊断
-        error_summary: Optional[str] = None,        # 新增：上次执行的错误概要
-        debug_mode: str = "crash",
+        current_diagnosis: Optional[Dict] = None,
+        error_summary: Optional[str] = None,
+        round_num: int = 1,
+        max_rounds: int = 3,
         max_turns: int = 20,
         temperature: float = 0.7,
         executor: Optional[ProcessPoolExecutor] = None
@@ -35,14 +36,15 @@ class DebugAgent:
         
         Args:
             api_key: DeepSeek API密钥
-            script_content: 原始代码（第1轮生成的纯净代码）
+            script_content: 待调试的脚本内容
             working_dir: 工作目录
             interpreter: Python解释器路径
             output_dir: 输出目录
             current_diagnosis: 任务级诊断（包含root_cause和patches）
             error_summary: 上次执行的错误概要
-            debug_mode: 调试模式
-            max_turns: 最大交互轮次
+            round_num: 当前迭代轮次
+            max_rounds: 最大迭代轮次
+            max_turns: 单次调试的最大交互轮次
             temperature: 采样温度
             executor: 进程池引用
         """
@@ -53,7 +55,8 @@ class DebugAgent:
         self.output_dir = Path(output_dir)
         self.current_diagnosis = current_diagnosis
         self.error_summary = error_summary
-        self.debug_mode = debug_mode
+        self.round_num = round_num
+        self.max_rounds = max_rounds
         self.max_turns = max_turns
         self.temperature = temperature
         
@@ -177,14 +180,16 @@ class DebugAgent:
     
     def _initialize_messages(self):
         """构建初始消息序列"""
-        system_prompt = build_system_prompt(self.debug_mode)
+        system_prompt = build_system_prompt()
         
         code_with_lines = format_code_with_line_numbers(self.script_content)
         
         user_message = build_initial_user_message(
             current_code=code_with_lines,
-            current_diagnosis=self.current_diagnosis,  # 改为任务级诊断
-            error_summary=self.error_summary
+            current_diagnosis=self.current_diagnosis,
+            error_summary=self.error_summary,
+            round_num=self.round_num,
+            max_rounds=self.max_rounds
         )
         
         self.messages = [
