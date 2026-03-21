@@ -56,31 +56,46 @@ def setup_opensource_env():
     # 依赖包按功能分组组织，便于后续维护与扩展
     packages = [
         # === 基础科学计算栈 ===
-        "numpy>=1.24.0",           # 数值计算基础
-        "pandas>=2.0.0",           # 数据框操作
-        "scipy>=1.11.0",           # 科学计算算法
-        "scikit-learn>=1.3.0",     # 机器学习工具
-        
+        "numpy>=1.24.0",               # 数值计算基础
+        "pandas>=2.0.0",               # 数据框操作
+        "scipy>=1.11.0",               # 科学计算算法
+        "scikit-learn>=1.3.0",         # 机器学习工具
+        "imbalanced-learn>=0.11.0",    # 不平衡数据采样（导入名imblearn）
+
         # === 矢量数据处理 ===
-        "geopandas>=0.14.0",       # 地理数据框，基于pandas扩展
-        "shapely>=2.0.0",          # 几何对象操作
-        "fiona>=1.9.0",            # 矢量格式I/O（Shapefile/GeoJSON等）
-        "pyproj>=3.6.0",           # 坐标系转换
-        "rtree>=1.0.0",            # 空间索引加速
-        
+        "geopandas>=0.14.0",           # 地理数据框，基于pandas扩展
+        "shapely>=2.0.0",              # 几何对象操作
+        "fiona>=1.9.0",                # 矢量格式I/O（Shapefile/GeoJSON等）
+        "pyproj>=3.6.0",               # 坐标系转换
+        "rtree>=1.0.0",                # 空间索引加速
+        "pyshp>=2.3.0",                # Shapefile直接读写（导入名shapefile）
+
         # === 栅格数据处理 ===
-        "rasterio>=1.3.0",         # 栅格格式I/O与操作
-        "scikit-image>=0.21.0",    # 图像处理算法
-        
+        "rasterio>=1.3.0",             # 栅格格式I/O与操作
+        "scikit-image>=0.21.0",        # 图像处理算法
+
         # === 空间分析专用库 ===
-        "pykrige>=1.7.0",          # 克里金插值（地统计学）
-        "pysal>=24.0",             # 空间分析工具集（包含libpysal等子包）
-        "osmnx>=1.8.0",            # OpenStreetMap网络分析
-        
+        "pykrige>=1.7.0",              # 克里金插值（地统计学）
+        "pysal>=24.1",                 # 空间分析工具集（元包）
+        "libpysal>=4.9.0",             # 空间权重与数据结构
+        "esda>=2.5.0",                 # 探索性空间数据分析
+        "mgwr>=2.2.0",                 # 多尺度地理加权回归
+        "osmnx>=1.8.0",               # OpenStreetMap网络分析
+        "networkx>=3.1",               # 图论与网络建模
+
+        # === 气象数据处理 ===
+        "scitools-iris>=3.7.0",        # 气象栅格分析（导入名iris）
+        "cftime>=1.6.0",               # 气候日历时间编码
+
         # === 可视化工具 ===
-        "matplotlib>=3.7.0",       # 基础绘图
-        "seaborn>=0.12.0",         # 统计可视化
-        "contextily>=1.4.0",       # 底图服务集成
+        "matplotlib>=3.7.0",           # 基础绘图
+        "seaborn>=0.12.0",             # 统计可视化
+        "contextily>=1.4.0",           # 底图服务集成
+        "geoplot>=0.5.0",              # 地理空间专题制图
+        "folium>=0.14.0",              # 交互式Web地图
+
+        # === 时区支持 ===
+        "pytz>=2023.3",                # IANA时区数据库
     ]
     
     for package in packages:
