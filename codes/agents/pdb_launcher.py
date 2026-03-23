@@ -86,7 +86,7 @@ class PdbLauncher:
 
         try:
             self._session = await PdbSessionController.start_with_pdb(
-                str(resolved),
+                str(resolved.resolve()),
                 str(self.working_dir),
                 self.interpreter,
             )
