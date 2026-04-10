@@ -103,17 +103,23 @@ def build_data_inspection_tools(
         ToolSpec(
             name="execute_script",
             description=(
-                "Run a Python script in the task's working directory. "
-                "Use for executing pre-built diagnostic routines from the "
-                "skill's scripts/ directory or your own custom inspection scripts. "
-                "Output is persisted to disk; the result contains the output directory path."
+                "Execute a Python script stored on disk or a code string passed "
+                "inline. Staple uses include invoking pre-packaged inspection scripts "
+                "bundled with the skill, running focused probes you have assembled, "
+                "and performing ad-hoc computations that do not merit a dedicated file. "
+                "Output is persisted to disk for file-based runs; inline invocations "
+                "return their console output directly in the result."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Script path (relative to working directory or absolute).",
+                        "description": "Script path (mutually exclusive with code).",
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute inline (mutually exclusive with file_path).",
                     },
                     "args": {
                         "type": "array",
@@ -122,10 +128,12 @@ def build_data_inspection_tools(
                         "default": [],
                     },
                 },
-                "required": ["file_path"],
+                "required": [],
             },
-            handler=lambda file_path, args=None, **_: script_executor.handle_execute_script(
-                file_path, with_tracing=False, args=args
+            handler=lambda file_path=None, code=None, args=None, **kwargs: (
+                script_executor.handle_execute_code(code)
+                if code else
+                script_executor.handle_execute_script(file_path, with_tracing=False, args=args)
             ),
         ),
     ]
@@ -138,22 +146,20 @@ def build_data_inspection_tools(
 def build_script_engineering_tools(
     skill_dir: Path,
     file_ops: FileOperations,
-    script_executor: ScriptExecutor,
 ) -> List[ToolSpec]:
     """
     构建脚本工程技能关联的工具集。
 
-    与数据审查技能共享文件操作和脚本执行的底层实现，
-    但脚本执行额外支持追踪模式。
+    工程师的职责收束为数据理解、脚本编写与断言植入，
+    交付后即退出活跃状态。工具集仅包含文件写入。
     """
     return [
         ToolSpec(
             name="write_file",
             description=(
                 "Create or overwrite a file at a given path. Primary uses include "
-                "committing the task script to 'current_script.py', saving auxiliary "
-                "modules, and capturing architectural plans or technical design notes "
-                "during the planning phase."
+                "committing the task script to 'current_script.py' and saving "
+                "technical design notes during the planning phase."
             ),
             parameters={
                 "type": "object",
@@ -171,13 +177,27 @@ def build_script_engineering_tools(
             },
             handler=file_ops.handle_write_file,
         ),
+    ]
+
+
+# ================================================================
+# 代码诊断技能 (code-diagnosis)
+# ================================================================
+
+def build_code_diagnosis_tools(
+    skill_dir: Path,
+    file_ops: FileOperations,
+    script_executor: ScriptExecutor,
+    pdb_launcher: PdbLauncher,
+) -> List[ToolSpec]:
+    return [
         ToolSpec(
             name="edit_file",
             description=(
                 "Apply search-and-replace edits to an existing file. "
-                "Use for applying patches, inserting assertions, or integrating "
-                "logging statements requested by the diagnostician. "
-                "Each search text must match exactly once."
+                "Principal use is patching current_script.py to address "
+                "identified defects. Each search text must match exactly "
+                "once; include sufficient surrounding context for unique targeting."
             ),
             parameters={
                 "type": "object",
@@ -204,45 +224,14 @@ def build_script_engineering_tools(
             handler=file_ops.handle_edit_file,
         ),
         ToolSpec(
-            name="execute_script",
-            description=(
-                "Run a Python script in the task's working directory. "
-                "Set with_tracing=true to inject exception tracking hooks and "
-                "function call monitors—advisable for task script executions, "
-                "though optional for lightweight validation passes. "
-                "Output is persisted to disk."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Script path relative to working directory.",
-                    },
-                    "with_tracing": {
-                        "type": "boolean",
-                        "description": "Inject error tracking and function monitoring.",
-                        "default": False,
-                    },
-                    "args": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Command-line arguments forwarded to the script.",
-                        "default": [],
-                    },
-                },
-                "required": ["file_path"],
-            },
-            handler=script_executor.handle_execute_script,
-        ),
-        ToolSpec(
             name="inject_and_save",
             description=(
                 "Insert code statements at specified line numbers in a source file "
                 "and save the result to a separate output file. The original file is "
-                "not modified. Indentation is automatically aligned to the target line. "
-                "Use for integrating logging or diagnostic print statements requested "
-                "by the diagnostician before re-execution."
+                "not modified. Use for weaving diagnostic print statements or variable "
+                "surveillance into a disposable copy—execute it, extract your "
+                "observations from the output, and move on without retaining the file "
+                "in your working view."
             ),
             parameters={
                 "type": "object",
@@ -267,7 +256,7 @@ def build_script_engineering_tools(
                                 },
                                 "code": {
                                     "type": "string",
-                                    "description": "Code to insert. Written without indentation; alignment is automatic.",
+                                    "description": "Code to insert.",
                                 },
                             },
                             "required": ["line_number", "code"],
@@ -278,48 +267,46 @@ def build_script_engineering_tools(
             },
             handler=file_ops.handle_inject_statements,
         ),
-    ]
-
-
-# ================================================================
-# 代码诊断技能 (code-diagnosis)
-# ================================================================
-
-def build_code_diagnosis_tools(
-    skill_dir: Path,
-    file_ops: FileOperations,
-    pdb_launcher: PdbLauncher,
-) -> List[ToolSpec]:
-    """
-    构建代码诊断技能关联的工具集。
-
-    Args:
-        skill_dir: 技能目录路径
-        file_ops: 文件操作实例（诊断专员仅需读写，编辑通过委托完成）
-        pdb_launcher: PDB会话启动器，封装调试器的生命周期管理
-    """
-    return [
         ToolSpec(
-            name="write_file",
+            name="execute_script",
             description=(
-                "Write text content to a file at a given path. Creates the file "
-                "if it does not exist, or overwrites it if it does."
+                "Run a Python script from disk or evaluate a code snippet supplied "
+                "as a direct parameter. When targeting a file, set with_tracing to "
+                "activate exception tracking hooks and function call monitors for "
+                "enriched failure analysis. Inline snippets execute without tracing "
+                "and return their stdout content directly—suited for quick empirical "
+                "checks that do not warrant a persistent script."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path relative to working directory.",
+                        "description": "Script path to execute (mutually exclusive with code).",
                     },
-                    "content": {
+                    "code": {
                         "type": "string",
-                        "description": "File content to write.",
+                        "description": "Python code to execute inline (mutually exclusive with file_path).",
+                    },
+                    "with_tracing": {
+                        "type": "boolean",
+                        "description": "Inject error tracking and function monitoring.",
+                        "default": False,
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Command-line arguments forwarded to the script.",
+                        "default": [],
                     },
                 },
-                "required": ["file_path", "content"],
+                "required": [],
             },
-            handler=file_ops.handle_write_file,
+            handler=lambda file_path=None, code=None, with_tracing=False, args=None, **kwargs: (
+                script_executor.handle_execute_code(code, with_tracing=with_tracing)
+                if code else
+                script_executor.handle_execute_script(file_path, with_tracing=with_tracing, args=args)
+            ),
         ),
         ToolSpec(
             name="start_postmortem_debug",
@@ -433,7 +420,7 @@ def register_all_skill_factories(
     skill_registry,
     file_ops: FileOperations,
     explorer_executor: ScriptExecutor,
-    engineer_executor: ScriptExecutor,
+    diagnostician_executor: ScriptExecutor,
     pdb_launcher: PdbLauncher,
 ):
     """
@@ -452,13 +439,13 @@ def register_all_skill_factories(
     skill_registry.register_tool_factory(
         "script-engineering",
         lambda skill_dir: build_script_engineering_tools(
-            skill_dir, file_ops, engineer_executor
+            skill_dir, file_ops
         ),
     )
 
     skill_registry.register_tool_factory(
         "code-diagnosis",
         lambda skill_dir: build_code_diagnosis_tools(
-            skill_dir, file_ops, pdb_launcher
+            skill_dir, file_ops, diagnostician_executor, pdb_launcher
         ),
     )
