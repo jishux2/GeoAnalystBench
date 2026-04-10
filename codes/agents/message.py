@@ -22,8 +22,6 @@ class MessageType(Enum):
     TASK_ASSIGNMENT = "task_assignment"   # 主控节点向成员分派工作指令
     TASK_REPORT = "task_report"          # 成员向其他成员或主控节点交付工作成果
     DATA_REQUEST = "data_request"        # 向其他成员索取特定信息
-    PATCH_SUBMISSION = "patch_submission" # 诊断专员向脚本工程师提交修改请求
-    INJECT_REQUEST = "inject_request"    # 诊断专员请求插入语句后执行
 
     # 主控节点的管理指令
     STATUS_INQUIRY = "status_inquiry"    # 询问成员当前进展
@@ -47,7 +45,7 @@ class Message:
     sender: str
     recipient: str
     content: str
-    payload: Dict[str, Any] = field(default_factory=dict)
+    payload: Any = field(default_factory=dict)
     msg_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     timestamp: float = field(default_factory=time.time)
 
