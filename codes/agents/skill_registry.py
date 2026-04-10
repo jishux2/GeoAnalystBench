@@ -129,24 +129,6 @@ class SkillRegistry:
 
         return entry.body
 
-    def unload(self, name: str, dispatcher: ToolDispatcher) -> str:
-        """
-        卸载指定技能：从调度器中移除关联工具。
-
-        Args:
-            name: 技能名称
-            dispatcher: 当前智能体的工具调度器
-
-        Returns:
-            确认消息
-        """
-        if name not in self._loaded:
-            return f"Skill '{name}' is not currently loaded."
-
-        dispatcher.unregister_by_skill(name)
-        del self._loaded[name]
-        return f"Skill '{name}' unloaded. Associated tools removed."
-
     def is_loaded(self, name: str) -> bool:
         return name in self._loaded
 
