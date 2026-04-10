@@ -34,6 +34,7 @@ def _run_command_sync(
     env: Dict[str, str],
     timeout: int = 120
 ) -> Dict[str, Any]:
+    env["PYTHONIOENCODING"] = "utf-8"
     try:
         result = subprocess.run(
             command,
@@ -41,6 +42,7 @@ def _run_command_sync(
             env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=timeout
         )
         return {
@@ -101,16 +103,20 @@ class FileOperations:
             resolved = self._safe_resolve(file_path)
             resolved.parent.mkdir(parents=True, exist_ok=True)
 
+            if append:
+                action = "Appended"
+            elif resolved.exists():
+                action = "Overwrote"
+            else:
+                action = "Created"
+
             mode = "a" if append else "w"
             with open(resolved, mode, encoding="utf-8") as f:
                 f.write(content)
 
-            action = "Appended" if append else "Wrote"
             return {
                 "success": True,
-                "result": f"{action} {len(content)} bytes to {file_path}",
-                "file_path": file_path,
-                "compress_write": True,
+                "result": f"{action} {file_path} ({len(content)} bytes written)",
             }
         except Exception as e:
             return {"success": False, "result": f"Write failed: {e}"}
@@ -118,17 +124,6 @@ class FileOperations:
     async def handle_edit_file(
         self, file_path: str, edits: List[Dict[str, str]]
     ) -> Dict[str, Any]:
-        """
-        对文件执行一组搜索-替换操作。
-
-        每个edit条目包含search和replace两个字段。
-        替换按列表顺序依次执行，每个搜索串必须在
-        当前文件内容中恰好匹配一次。
-
-        Args:
-            file_path: 目标文件路径
-            edits: 搜索-替换对列表
-        """
         try:
             resolved = self._safe_resolve(file_path)
             if not resolved.exists():
@@ -163,7 +158,6 @@ class FileOperations:
             return {
                 "success": True,
                 "result": f"Applied {len(edits)} edit(s) to {file_path}",
-                "file_path": file_path,
             }
         except PermissionError as e:
             return {"success": False, "result": str(e)}
@@ -176,18 +170,6 @@ class FileOperations:
         output_path: str,
         injections: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """
-        在源文件的指定位置插入语句，另存为新文件。
-
-        每个injection条目包含line_number和code两个字段。
-        插入操作基于原始文件的行号，代码的缩进自动对齐
-        到目标行的层级。按行号降序处理以避免偏移。
-
-        Args:
-            source_path: 原始脚本路径
-            output_path: 插入后的输出文件路径
-            injections: 插入指令列表
-        """
         try:
             source = self._safe_resolve(source_path)
             if not source.exists():
@@ -212,22 +194,7 @@ class FileOperations:
                     }
 
                 target_idx = line_num - 1
-
-                # 获取目标行的缩进并应用到插入代码
-                if target_idx < len(lines):
-                    target_line = lines[target_idx]
-                    indent = len(target_line) - len(target_line.lstrip())
-                else:
-                    indent = 0
-
-                indented_lines = []
-                for code_line in code.split("\n"):
-                    if code_line.strip():
-                        indented_lines.append(" " * indent + code_line)
-                    else:
-                        indented_lines.append(code_line)
-
-                lines.insert(target_idx, "\n".join(indented_lines))
+                lines.insert(target_idx, code)
 
             output = self._safe_resolve(output_path)
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -239,8 +206,6 @@ class FileOperations:
                     f"Injected {len(injections)} statement(s) into {source_path}, "
                     f"saved to {output_path}"
                 ),
-                "file_path": output_path,
-                "compress_write": True,
             }
         except PermissionError as e:
             return {"success": False, "result": str(e)}
@@ -374,6 +339,81 @@ class ScriptExecutor:
             "result": "\n".join(summary_parts),
             "file_path": str(relative_output),
         }
+
+    async def handle_execute_code(
+        self,
+        code: str,
+        with_tracing: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        执行传入的Python代码字符串并直接返回输出。
+
+        代码写入系统临时文件执行，不纳入任务归档结构。
+        stdout直接作为结果返回，适用于轻量级验证场景。
+        """
+        import tempfile
+        import os
+
+        try:
+            # 写入系统临时目录
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".py", delete=False, encoding="utf-8"
+            ) as f:
+                if with_tracing:
+                    f.write(self._inject_tracing(code))
+                else:
+                    f.write(code)
+                temp_path = f.name
+
+            # 构造执行命令
+            command = [self.interpreter, temp_path]
+            env = os.environ.copy()
+
+            # 执行
+            if self.executor:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    self.executor,
+                    _run_command_sync,
+                    command,
+                    str(self.working_dir),
+                    env,
+                    120,
+                )
+            else:
+                result = _run_command_sync(
+                    command,
+                    str(self.working_dir),
+                    env,
+                    120,
+                )
+
+            # 清理临时文件
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+            # 组装返回结果
+            success = result["returncode"] == 0
+            parts = []
+
+            if result["stdout"].strip():
+                parts.append(result["stdout"].strip())
+
+            if not success and result["stderr"].strip():
+                parts.append(f"Stderr:\n{result['stderr'].strip()}")
+
+            if not parts:
+                parts.append("(no output)")
+
+            return {
+                "success": success,
+                "result": "\n".join(parts),
+            }
+
+        except Exception as e:
+            return {"success": False, "result": f"Inline execution failed: {e}"}
 
     def _inject_tracing(self, code: str) -> str:
         """注入异常追踪钩子和函数监控装饰器。"""
