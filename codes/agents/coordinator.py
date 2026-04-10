@@ -153,10 +153,10 @@ class Coordinator:
             executor=self._process_executor,
         )
 
-        engineer_executor = ScriptExecutor(
+        diagnostician_executor = ScriptExecutor(
             interpreter=self.interpreter,
             working_dir=self.working_dir,
-            output_dir=self.output_dir / "engineer",
+            output_dir=self.output_dir / "diagnostician",
             executor=self._process_executor,
         )
 
@@ -167,16 +167,18 @@ class Coordinator:
         self._pdb_launcher = pdb_launcher
 
         register_all_skill_factories(
-            skill_registry, file_ops, explorer_executor, engineer_executor, pdb_launcher
+            skill_registry, file_ops,
+            explorer_executor,
+            diagnostician_executor, pdb_launcher,
         )
 
         agents = self._build_agent_configs(skill_registry)
 
-        # 先注册通道（_build_agent_configs中BaseAgent.__init__已完成）
-        # 再投递初始指令，确保消息在协程启动前就位
+        # 投递初始指令——探查员立即获得完整任务描述，
+        # 工程师和诊断专员仅收到待命通知
         await self._dispatch_initial_instructions()
 
-        # 最后启动协程
+        # 启动协程
         for agent_name, agent_instance in agents.items():
             task = asyncio.create_task(
                 agent_instance.run(),
@@ -215,7 +217,11 @@ class Coordinator:
 
     async def _dispatch_initial_instructions(self):
         """
-        向三个子智能体投递启动时的情境通报与即刻行动指引。
+        向三个子智能体投递启动阶段的情境通报。
+
+        探查员作为流程的首发环节，立即获得完整的任务描述
+        并着手数据摸底。工程师和诊断专员各自收到一条待命
+        通知，明确告知它们的介入时机取决于上游交付物的到位。
 
         内容严格限于此刻的团队动态和各成员的首要动作，
         不重复角色提示词中的职责描述或技能文档中的方法论。
@@ -227,11 +233,13 @@ class Coordinator:
             sender="coordinator",
             recipient="explorer",
             content=(
-                "The team is now active on the following geospatial analysis task. "
-                "The engineer is simultaneously drafting an architectural plan and "
-                "will depend on your structural findings to finalize implementation. "
-                "Prioritize the dataset dimensions most relevant to the operations "
-                "this task demands.\n\n"
+                "A geospatial analysis task has been assigned to the team. As the "
+                "first member to engage, survey the dataset resources and compile "
+                "an inventory of their schemas, spatial attributes, and quality "
+                "characteristics. The engineer is standing by for your deliverables "
+                "and will not begin implementation until your report is in hand. "
+                "Direct your attention toward the dimensions most consequential "
+                "for the operations this task prescribes.\n\n"
                 f"Task specification:\n{task_description}"
             ),
         ))
@@ -241,11 +249,12 @@ class Coordinator:
             sender="coordinator",
             recipient="engineer",
             content=(
-                "The team is now active on the following geospatial analysis task. "
-                "The explorer is concurrently profiling the dataset and will forward "
-                "a structural report once complete. Begin with abstract architectural "
-                "reasoning—processing stages, operation sequencing, data flow "
-                "topology—while awaiting those concrete details.\n\n"
+                "The team has commenced work on a geospatial analysis task. The "
+                "explorer is currently conducting a comprehensive audit of the "
+                "dataset and will relay the findings once the examination concludes. "
+                "Remain idle until that material reaches you—your design and coding "
+                "effort should proceed only after you have internalized the data "
+                "landscape and clarified any residual uncertainties with the explorer.\n\n"
                 f"Task specification:\n{task_description}"
             ),
         ))
@@ -255,11 +264,12 @@ class Coordinator:
             sender="coordinator",
             recipient="diagnostician",
             content=(
-                "The team is now active on the following geospatial analysis task. "
-                "The explorer is profiling the dataset and the engineer is developing "
-                "the initial script. Your involvement begins when the engineer delivers "
-                "the executable artifact and its runtime output. Hold idle until that "
-                "handoff arrives.\n\n"
+                "The collaborative pipeline for a geospatial analysis task has been "
+                "set in motion. The explorer is assembling a data characterization "
+                "report while the engineer awaits that input before drafting the "
+                "script. You will be called upon once the engineer signals that the "
+                "source artifact has been deposited at the agreed-upon location. "
+                "Suspend activity until that notification arrives.\n\n"
                 f"Task specification:\n{task_description}"
             ),
         ))
@@ -270,8 +280,9 @@ class Coordinator:
 
         每个周期中：
         1. 消费主控节点收件箱中的消息
-        2. 判定是否达成成功条件或触及超时
-        3. 未达终态则继续等待
+        2. 检查子任务存活状态
+        3. 判定是否达成成功条件或触及超时
+        4. 未达终态则继续等待
         """
         while True:
             elapsed = time.time() - self._start_time
@@ -290,15 +301,47 @@ class Coordinator:
                 if result is not None:
                     return result
 
-            # 超时后仍无终态消息，发送状态询问
-            # （仅当距上次检查已过一个完整周期时触发）
+            # 主动巡检子任务健康状态
+            crash_result = self._check_agent_health()
+            if crash_result is not None:
+                return crash_result
+
             if msg is None and elapsed > self.check_interval:
                 await self._probe_team_status()
 
+    def _check_agent_health(self) -> Optional[Dict[str, Any]]:
+        """
+        检查子任务是否有异常终止的情况。
+
+        遍历所有已注册的子任务，若发现某个Task已完成且
+        携带异常，提取异常信息并返回失败结果。
+        """
+        for agent_name, task in self._agent_tasks.items():
+            if task.done() and not task.cancelled():
+                exc = task.exception()
+                if exc is not None:
+                    return {
+                        "success": False,
+                        "error": f"Agent '{agent_name}' crashed: {type(exc).__name__}: {exc}",
+                        "patches": self._generate_diff(),
+                        "terminated_by": "agent_crash",
+                    }
+        return None
+
     def _process_coordinator_message(self, msg: Message) -> Optional[Dict[str, Any]]:
-        """
-        处理抵达主控节点的消息。
-        """
+        """处理抵达主控节点的消息。"""
+        # 子智能体崩溃通知
+        if (
+            msg.msg_type == MessageType.TASK_REPORT
+            and msg.payload.get("agent_crash")
+        ):
+            return {
+                "success": False,
+                "error": f"Agent '{msg.sender}' reported fatal error: {msg.content}",
+                "patches": self._generate_diff(),
+                "terminated_by": "agent_crash",
+            }
+
         if (
             msg.msg_type == MessageType.TASK_REPORT
             and msg.sender == "engineer"
