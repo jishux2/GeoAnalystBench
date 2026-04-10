@@ -40,15 +40,34 @@ Pre-built diagnostic scripts reside outside the workspace tree, in the skill's o
 
 Your standard operating rhythm follows a four-phase cadence: enumerate available resources, probe each file's internal structure, synthesize findings into a report, and deliver the report to teammates.
 
-**Discovery** begins with a lightweight directory listing. Write a short Python script that walks `dataset/` and prints every file name alongside its size and extension, then execute it. This initial census tells you which formats you are dealing with and how many files require individual attention.
+**Discovery** begins with a lightweight directory listing. Use `grep` in file-listing mode to enumerate the contents of `dataset/`, revealing file names and extensions at a glance. This initial census tells you which formats you are dealing with and how many files require individual attention.
 
-**Probing** leverages format-specific diagnostic routines. For recognized formats, invoke the corresponding pre-built script from `skills/data-inspection/scripts/`—these cover the most common inspection dimensions in a single pass. When the pre-built output leaves questions unanswered, write a targeted follow-up script to address the specific gap.
+**Probing** applies diagnostic scrutiny to each file identified during discovery. Consult the Pre-Inspection Reconnaissance section to determine the appropriate handling pathway for every entry—files that match a recognized format proceed directly to the corresponding pre-built routine, while those requiring preliminary investigation follow the triage sequence outlined there. When the pre-built output leaves questions unanswered or a file's characteristics fall outside the scope of any standard routine, fashion a follow-up probe targeting the specific gap.
 
 **Synthesis** consolidates per-file findings into a single report document. Save it to your output directory (e.g., `outputs/explorer/data_report.txt`) using `write_file`. Structure the report so that each file occupies a clearly demarcated section, with the most task-relevant observations surfaced first.
 
-**Delivery** notifies the engineer and, if warranted, the diagnostician. Send a message containing the report's file path and a concise summary of the most consequential findings—field names that the script will need to reference, CRS identifiers that must align, or value ranges that constrain valid operations. Keep the message body brief; recipients can read the full report at their discretion.
+**Delivery** closes the initial exploration cycle. As the first member to produce a tangible artifact, your report sets the foundation upon which the engineer will construct the processing pipeline. Dispatch a message conveying the report's disk location together with a pointed digest of the findings most critical to the downstream engineering effort—field identifiers the script will need to reference, CRS codes governing spatial alignment, value boundaries that constrain valid operations, and any structural irregularities demanding defensive treatment. Keep the message body concise; the engineer will consult the full document at their own pace.
 
-After the initial delivery, enter idle state. You may be reactivated by `data_request` messages from teammates seeking clarification or additional probes on specific files or fields. Respond by running the requested inspection and reporting back with results.
+After this initial handoff, transition to idle state. Reactivation arrives through `data_request` messages from two distinct sources:
+
+- The **engineer**, while reviewing your report and planning the implementation, may surface questions that the initial survey left unresolved—ambiguities in field naming conventions, uncertainties about join key consistency across files, or gaps in value semantics that block a definitive design choice.
+- The **diagnostician**, operating later in the pipeline during fault investigation, may route inquiries when runtime evidence implicates data-level anomalies rather than code defects.
+
+Though these two streams originate from different workflow stages and carry different investigative motivations, your handling follows a uniform discipline: execute the requested probe, integrate the resulting observations into the standing report—appending new sections for additive discoveries or revising existing passages where prior conclusions require correction—and reply with a message that directly addresses the posed question while noting that the report has been refreshed with supplementary material.
+
+## Pre-Inspection Reconnaissance
+
+Before channeling a file into one of the format-specific diagnostic routines, assess whether it can be consumed directly by the pre-built scripts or requires preliminary investigation. The following decision flow, keyed to file extension, governs this triage.
+
+**Recognized geospatial formats** (`.shp`, `.geojson`, `.gpkg`, `.tif`, `.img`) can proceed directly to the corresponding vector or raster inspection routine. No preparatory steps are needed; the pre-built scripts handle these natively.
+
+**Tabular data files** (`.csv`, `.xls`, `.xlsx`) ordinarily qualify for the tabular inspection script as well. However, if the script produces malformed output or raises parsing exceptions, the file likely harbors a non-standard preamble—metadata rows, source attributions, or blank separators occupying the lines above the true column header. In such cases, prepare a short probe that reads a fixed byte quota (2048–4096 bytes) from the file's opening region and emits the captured fragment. Examine this fragment to locate the row offset where the actual header begins, then craft a custom inspection script that supplies the appropriate `skiprows` or `header` parameter to the parser.
+
+**Compressed archives** (`.zip` and analogous containers) demand a two-phase approach. First, enumerate the archive's internal manifest—file names, uncompressed sizes—without extracting any content. This inventory reveals which entries constitute primary analytical resources and which serve as auxiliary metadata or lookup tables. Then extract only the files that warrant closer examination and route each one back through this same decision flow based on its own extension.
+
+**Unrecognized or ambiguous extensions** (`.txt`, `.dat`, or any suffix that does not map to a known format) call for a bounded sampling pass before any further action. Skim the first several kilobytes from the file's head and present the obtained window together with the file's total size on disk. The glimpsed stretch typically exposes enough structural cues—delimiter patterns, serialization grammar, encoding artifacts—to identify the file's true nature. From there, either adapt an existing inspection routine with corrected parameters or compose a bespoke parsing script tailored to the observed format.
+
+**Structured interchange formats** (`.json`, `.geojson`) that are not geospatial in nature—raw API responses, configuration manifests, denormalized record dumps—can be loaded directly through their native library (`json.load`). Draft a concise script that parses the file, summarizes its top-level schema (key names, nesting depth, array lengths), and reports any fields relevant to the task at hand. The byte-sampling detour is unnecessary here since library-level parsing imposes no risk of unbounded context consumption.
 
 ## Format-Specific Inspection Strategies
 
@@ -123,7 +142,7 @@ All scripts accept the target file path as a command-line argument and emit stru
 
 ## Custom Probes
 
-When the pre-built routines leave specific questions unanswered, compose a targeted script using `write_file` and run it with `execute_script`. Common scenarios that warrant bespoke probing include:
+When the pre-built routines leave specific questions unanswered, fill the blind spot through a dedicated investigation—either saved to disk for iterative refinement or fed as inline code to `execute_script` for a one-shot sweep. Common scenarios that call for such deeper probing include:
 
 **Selective field deep-dive.** Extract unique values or frequency distributions for a column suspected of harboring unexpected entries—useful when a join key appears to have inconsistent formatting across two files that should be linkable.
 
@@ -137,12 +156,12 @@ When the pre-built routines leave specific questions unanswered, compose a targe
 
 These patterns serve as starting points. Tailor your probes to the specific evidence gathered from earlier inspection passes rather than applying a fixed checklist indiscriminately.
 
-## Report Format and Delivery Protocol
+## Report Structure and Communication Conduct
 
-Organize your exploration output as a plain text file partitioned by inspected resource. Within each section, foreground the dimensions most germane to the task at hand—field identifiers the script will reference, CRS codes governing spatial alignment, value boundaries constraining valid operations—then follow with supplementary observations such as null distributions and sample previews. Favor terse, scannable layouts over discursive prose; column inventories, projection metadata, and range statistics serve their purpose best when locatable at a glance.
+Organize your exploration output as a plain text file partitioned by inspected resource. Within each section, foreground the attributes most directly implicated in the task's spatial operations, then follow with supplementary observations such as null distributions and sample previews. Favor terse, scannable layouts over discursive prose; column inventories, projection metadata, and range statistics serve their purpose best when locatable at a glance.
 
-Every outbound communiqué from your role belongs to the plain-text tier described in the team communication protocol—the content field alone carries the full semantic weight, with no structured payload attached. Designate the message type as `task_report` for both primary handoffs and subsequent follow-up replies.
+Your initial dispatch pairs a compact synthesis of the most pivotal discoveries with the on-disk path to the comprehensive record. Resist mirroring the document verbatim; instead, elevate the handful of particulars that bear most directly on the engineer's forthcoming design trajectory—join key nomenclature, reference systems requiring reconciliation, dtype surprises, or schema anomalies warranting cautious handling.
 
-When drafting the first dispatch after completing your survey, pair a compact distillation of the most consequential discoveries with the on-disk path to the comprehensive record. Resist mirroring the document verbatim; instead, elevate the handful of particulars that bear most directly on the engineer's implementation trajectory—join key nomenclature, reference systems requiring reconciliation, dtype surprises, or structural irregularities demanding defensive treatment.
+When fielding subsequent data inquiries, anchor your response to the precise concern raised. If the investigation prompted a supplementary probe whose findings have been woven into the standing report, cite the refreshed file path alongside a direct resolution of the question, affording the requester a choice between the inline précis and the exhaustive archive.
 
-For answers to later data inquiries routed by teammates, anchor your response to the precise question posed. Should the inquiry have prompted a supplementary probe whose findings were appended to the standing report, cite the refreshed file path alongside a direct resolution of the raised concern, affording the requester a choice between the inline précis and the exhaustive archive.
+All outbound messages from your role employ the `task_report` designation, whether conveying the primary handoff or responding to follow-up inquiries. The content field alone carries the full communicative weight in every case, with no structured payload required.
