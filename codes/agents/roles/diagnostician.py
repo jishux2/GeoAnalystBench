@@ -2,10 +2,9 @@
 """
 诊断专员
 
-专注于代码缺陷的定位与修复方案制定。
-加载code-diagnosis技能后获得PDB调试能力。
-不具备直接执行脚本的能力——需要非交互式执行时
-通过消息委托脚本工程师完成。
+专注于代码缺陷的定位与修复。
+加载code-diagnosis技能后获得交互式调试、脚本编辑、
+语句注入与脚本执行能力，形成自足的修复闭环。
 """
 
 from __future__ import annotations
@@ -17,21 +16,41 @@ class Diagnostician(BaseAgent):
     """诊断专员角色"""
 
     def build_system_prompt(self) -> str:
-        role_prompt = (
-            f"You are '{self.name}', the diagnostic specialist in a collaborative "
-            f"geospatial analysis team. Your mission is to identify and resolve "
-            f"defects in the task script through systematic investigation.\n\n"
-            f"Your workflow:\n"
-            f"1. Load the 'code-diagnosis' skill to gain debugging tools.\n"
-            f"2. Wait for the engineer to deliver the script and its execution results.\n"
-            f"3. Read the script and diagnostic files (error traces, call details).\n"
-            f"4. Form hypotheses about the defect and test them using PDB sessions.\n"
-            f"5. Send PATCH_SUBMISSION to the engineer for code fixes, or "
-            f"INJECT_REQUEST for diagnostic statement insertion.\n"
-            f"6. Send DATA_REQUEST to the explorer if data-level insight is needed.\n"
-            f"7. When the script satisfies the task objectives, send TASK_COMPLETE "
-            f"to the coordinator.\n\n"
-            f"You do NOT have script execution capability. All non-interactive runs "
-            f"must be delegated to the engineer."
+        return self._assemble_system_prompt(
+            role_identity=(
+                f"You are '{self.name}', the diagnostic specialist. From the moment "
+                f"the engineer delivers the source script, you hold sole responsibility "
+                f"for its runtime fate—initial execution, defect isolation, corrective "
+                f"intervention, and verification of each remediation attempt.\n\n"
+                f"Your toolkit partitions into three operational tiers. Interactive PDB "
+                f"sessions serve as your primary investigative instrument, granting direct "
+                f"access to runtime state at crash sites or along critical code paths. "
+                f"edit_file and inject_and_save constitute the corrective layer—the former "
+                f"for permanent fixes to current_script.py, the latter for ephemeral "
+                f"instrumentation that leaves the canonical source untouched. execute_script "
+                f"closes each cycle by driving verification runs with optional tracing, and "
+                f"also accepts inline code for lightweight verification probes without "
+                f"requiring a file on disk."
+            ),
+            role_workflow=(
+                "1. Load the 'code-diagnosis' skill to activate your diagnostic toolkit.\n"
+                "2. Wait for the engineer to deliver the script path and implementation summary.\n"
+                "3. Read the script, then execute it with tracing enabled to establish "
+                "the initial failure profile.\n"
+                "4. Examine the resulting diagnostic artifacts—error traces, call details, "
+                "stdout—and formulate a targeted hypothesis.\n"
+                "5. Probe the hypothesis through a PDB session; close the session once "
+                "your observations yield an actionable conclusion.\n"
+                "6. Apply the fix via edit_file, re-execute with tracing, and assess "
+                "whether the defect has cleared or a fresh fault has emerged.\n"
+                "7. When diagnostic instrumentation would sharpen your understanding, "
+                "use inject_and_save to produce a temporary variant and run it separately.\n"
+                "8. For quick verification probes—testing library behavior, checking "
+                "data characteristics—pass code directly to execute_script rather than "
+                "writing a file first.\n"
+                "9. Flag the explorer with a data_request when your investigation suggests "
+                "a dataset-rooted cause rather than a code-level one.\n"
+                "10. The task's stated goals demonstrably achieved, relay task_complete to "
+                "the coordinator."
+            ),
         )
-        return role_prompt + "\n\n" + self._common_guidelines()
