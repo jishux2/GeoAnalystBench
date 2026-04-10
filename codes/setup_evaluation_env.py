@@ -61,6 +61,7 @@ def setup_opensource_env():
         "scipy>=1.11.0",               # 科学计算算法
         "scikit-learn>=1.3.0",         # 机器学习工具
         "imbalanced-learn>=0.11.0",    # 不平衡数据采样（导入名imblearn）
+        "catboost>=1.2.0",             # 梯度提升模型（原生类别特征支持）
 
         # === 矢量数据处理 ===
         "geopandas>=0.14.0",           # 地理数据框，基于pandas扩展
@@ -72,7 +73,9 @@ def setup_opensource_env():
 
         # === 栅格数据处理 ===
         "rasterio>=1.3.0",             # 栅格格式I/O与操作
+        r"wheels\gdal-3.11.4-cp311-cp311-win_amd64.whl",  # 地理空间数据抽象层（导入名osgeo）
         "scikit-image>=0.21.0",        # 图像处理算法
+        "rasterstats>=0.19.0",         # 栅格区域统计（按矢量范围汇总像素值）
 
         # === 空间分析专用库 ===
         "pykrige>=1.7.0",              # 克里金插值（地统计学）
@@ -82,6 +85,7 @@ def setup_opensource_env():
         "mgwr>=2.2.0",                 # 多尺度地理加权回归
         "osmnx>=1.8.0",               # OpenStreetMap网络分析
         "networkx>=3.1",               # 图论与网络建模
+        "whitebox>=2.3.0",             # WhiteboxTools地形与水文分析
 
         # === 气象数据处理 ===
         "scitools-iris>=3.7.0",        # 气象栅格分析（导入名iris）
@@ -90,12 +94,16 @@ def setup_opensource_env():
         # === 可视化工具 ===
         "matplotlib>=3.7.0",           # 基础绘图
         "seaborn>=0.12.0",             # 统计可视化
+        "plotly>=5.18.0",              # 交互式图表与地理可视化
         "contextily>=1.4.0",           # 底图服务集成
         "geoplot>=0.5.0",              # 地理空间专题制图
         "folium>=0.14.0",              # 交互式Web地图
+        "gmplot>=1.4.0",               # Google Maps覆盖层绘制
 
-        # === 时区支持 ===
+        # === 辅助工具 ===
         "pytz>=2023.3",                # IANA时区数据库
+        "requests>=2.31.0",            # HTTP客户端
+        "tqdm>=4.66.0",                # 进度条显示
     ]
     
     for package in packages:
