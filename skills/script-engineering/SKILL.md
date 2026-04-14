@@ -16,14 +16,15 @@ Your ownership therefore spans a well-delineated arc: absorbing the explorer's s
 Your primary artifact is `current_script.py` at the task directory root. This file constitutes the single source of truth for the task implementation—the diagnostician's every subsequent modification traces back to this initial commit.
 
 ```
-evaluation_workspace/{task_id}/
-├── dataset/                        ← source data (consult the explorer's report for schema details)
-├── current_script.py               ← your deliverable
+benchmark_workspace/{source}/{task_ID}/
+├── current_script.py               ← the task program you will pen
 └── outputs/
     ├── explorer/
-    │   └── data_report.txt         ← structural profile compiled by the explorer
-    └── engineer/                   ← reserved for your output artifacts
+    │   └── data_report.txt         ← dataset profile issued by the explorer
+    └── engineer/                   ← your scratch space
 ```
+
+Source data is kept apart from this directory, in a communal repository grouped by collection. The explorer's report pinpoints each file the task relies on and its repository coordinates. Transcribe these paths as-is into your script rather than recomputing them from directory structure guesswork.
 
 ## Development Lifecycle
 
@@ -68,11 +69,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 ```
 
-**Output directory provisioning.** If the script persists results to a subdirectory, guarantee the target path exists before any write operation:
+**Output destination.** Every file the script spawns as an end product—result datasets, generated maps, analytical summaries—must land in a `pred_results/` subdirectory inside the task folder. Purge and recreate this directory at the top of `main()` so that each execution starts from a clean slate:
 
 ```python
-os.makedirs("pred_results", exist_ok=True)
+import os, shutil
+
+output_dir = "pred_results"
+if os.path.exists(output_dir):
+    shutil.rmtree(output_dir)
+os.makedirs(output_dir, exist_ok=True)
 ```
+
+Throwaway files that serve only the script's internal logic—intermediate rasters, temporary joins—should stay in the working directory proper, not in `pred_results/`.
 
 **Function monitoring setup.** The runtime harness optionally injects a `monitor_call` decorator that captures argument snapshots and exception context for wrapped library calls. Your script must remain executable in environments where this injection has not occurred. Place a defensive fallback near the top, before any wrapper registrations:
 
@@ -143,7 +151,7 @@ assert "STATION_ID" in gdf.columns, (
 **Output artifact validation.** At the pipeline's terminus, verify that every expected output file has been successfully produced:
 
 ```python
-output_path = "pred_results/analysis_output.gpkg"
+output_path = os.path.join(output_dir, "analysis_output.gpkg")
 assert os.path.exists(output_path), f"Output file not created: {output_path}"
 assert os.path.getsize(output_path) > 0, f"Output file is empty: {output_path}"
 ```
@@ -163,19 +171,20 @@ The pipeline's opening stage loads source files into memory and prepares them fo
 ```python
 import geopandas as gpd
 
-gdf = gpd.read_file("dataset/boundaries.shp")
+# <dataset_repository> — the absolute path reported by the explorer for this task's source collection
+gdf = gpd.read_file("<dataset_repository>/boundaries.shp")
 ```
 
 When the source file is large and only a geographic subset is needed, supply a bounding box filter to avoid ingesting the full extent:
 
 ```python
-gdf = gpd.read_file("dataset/parcels.gpkg", bbox=(xmin, ymin, xmax, ymax))
+gdf = gpd.read_file("<dataset_repository>/parcels.gpkg", bbox=(xmin, ymin, xmax, ymax))
 ```
 
 For GeoPackage files containing multiple layers, specify the target by name:
 
 ```python
-gdf = gpd.read_file("dataset/multi_layer.gpkg", layer="water_bodies")
+gdf = gpd.read_file("<dataset_repository>/multi_layer.gpkg", layer="water_bodies")
 ```
 
 **Raster loading.** Rasterio operates through a context manager that exposes both metadata and pixel access:
@@ -184,7 +193,7 @@ gdf = gpd.read_file("dataset/multi_layer.gpkg", layer="water_bodies")
 import rasterio
 import numpy as np
 
-with rasterio.open("dataset/elevation.tif") as src:
+with rasterio.open("<dataset_repository>/elevation.tif") as src:
     band = src.read(1)            # First band as 2D array
     profile = src.profile         # Resolution, CRS, transform, nodata
     nodata = src.nodata
@@ -193,7 +202,7 @@ with rasterio.open("dataset/elevation.tif") as src:
 A critical pitfall with raster data is neglecting the NoData mask. Pixels carrying the sentinel value represent absent measurements and must be excluded from any statistical computation:
 
 ```python
-with rasterio.open("dataset/temperature.tif") as src:
+with rasterio.open("<dataset_repository>/temperature.tif") as src:
     data = src.read(1)
     valid = np.where(data != src.nodata, data, np.nan)
     mean_temp = np.nanmean(valid)
@@ -204,13 +213,13 @@ with rasterio.open("dataset/temperature.tif") as src:
 ```python
 import pandas as pd
 
-attributes = pd.read_csv("dataset/census_data.csv")
+attributes = pd.read_csv("<dataset_repository>/census_data.csv")
 ```
 
 When the file harbors non-standard header placement (metadata preamble rows above the true column line), supply the appropriate offset:
 
 ```python
-attributes = pd.read_csv("dataset/world_bank_data.csv", skiprows=4)
+attributes = pd.read_csv("<dataset_repository>/world_bank_data.csv", skiprows=4)
 ```
 
 ### Coordinate System Alignment
@@ -325,7 +334,8 @@ The pipeline's closing stage writes analytical products to disk and optionally g
 **Vector output.** GeoPackage is the preferred format for modern workflows—it supports multiple layers in a single file, handles long field names, and stores CRS metadata reliably:
 
 ```python
-result_gdf.to_file("pred_results/analysis_output.gpkg", driver="GPKG")
+# output_dir — defined earlier under Output destination
+result_gdf.to_file(os.path.join(output_dir, "analysis_output.gpkg"), driver="GPKG")
 ```
 
 For interoperability with legacy systems that require Shapefiles, be aware of the 10-character field name limit—columns with longer names will be silently truncated.
@@ -354,7 +364,7 @@ fig, ax = plt.subplots(figsize=(12, 8))
 base_layer.plot(ax=ax, color="lightgrey", edgecolor="white")
 result_gdf.plot(ax=ax, column="score", cmap="YlOrRd", legend=True)
 ax.set_title("Analysis Results")
-plt.savefig("pred_results/output_map.png", dpi=150, bbox_inches="tight")
+plt.savefig(os.path.join(output_dir, "output_map.png"), dpi=150, bbox_inches="tight")
 ```
 
 For thematic maps that require a basemap underlay, contextily retrieves web tiles and composites them beneath your data layers:

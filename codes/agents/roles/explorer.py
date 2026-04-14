@@ -26,7 +26,7 @@ class DataExplorer(BaseAgent):
             ),
             role_workflow=(
                 "1. Load the 'data-inspection' skill to gain inspection tools.\n"
-                "2. Enumerate files in the dataset/ directory.\n"
+                "2. Ascertain which files the task calls upon from its specification.\n"
                 "3. For each file, run the appropriate pre-built diagnostic script "
                 "or devise a fit-for-task probe as needed.\n"
                 "4. Compile findings into a structured report, save it to disk, "

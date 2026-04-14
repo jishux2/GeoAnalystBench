@@ -15,32 +15,29 @@ Investigations should be purposeful rather than exhaustive. Prioritize dimension
 
 ## Workspace Layout
 
-Each task occupies an isolated directory under the evaluation workspace:
+The task directory at `{source}/{task_ID}/` provides the staging ground for the team's activities:
 
 ```
-evaluation_workspace/{task_id}/
-├── dataset/                    ← geospatial source files live here
+benchmark_workspace/{source}/{task_ID}/
 ├── current_script.py           ← task script (managed by the engineer)
 └── outputs/
     └── explorer/               ← your diagnostic outputs land here
-        ├── data_report.txt     ← synthesized exploration report
+        ├── data_report.txt     ← aggregated exploration report
         └── run_{n}/            ← per-execution archives
             ├── executed_script.py
             ├── stdout.txt
             └── stderr.txt
 ```
 
-The `dataset/` subdirectory holds every file the task script is expected to consume. File names within this directory are authoritative—when they diverge from the task prompt's wording, the physical file system takes precedence.
+Your work products—the synthesized exploration report and any ancillary probes—gather under `outputs/explorer/`. Each call to `execute_script` deposits a numbered subdirectory there, preserving the script as actually run alongside its captured output streams. Should the returned summary fall short of resolving your query, use `read_file` against the full stdout archive to recover the detail.
 
-Each invocation of `execute_script` produces a numbered subdirectory under your output area, containing the script as actually executed along with its captured output streams. The result summary returned by the tool includes the subdirectory path—use `read_file` to examine full output when the summary alone is insufficient.
-
-Pre-built diagnostic scripts reside outside the workspace tree, in the skill's own directory. Reference them by absolute path when invoking `execute_script`.
+Data files sit in a shared repository at `benchmark_datasets/{source}/`, pooling every resource that tasks from the same collection may reference. No per-task partitioning exists within that directory; the task description indicates which entries are germane to the current undertaking. Pre-packaged diagnostic routines ship with the skill itself, outside both of these structures—invoke them by absolute path through `execute_script`.
 
 ## Tool Workflow
 
 Your standard operating rhythm follows a four-phase cadence: enumerate available resources, probe each file's internal structure, synthesize findings into a report, and deliver the report to teammates.
 
-**Discovery** begins with a lightweight directory listing. Use `grep` in file-listing mode to enumerate the contents of `dataset/`, revealing file names and extensions at a glance. This initial census tells you which formats you are dealing with and how many files require individual attention.
+**Discovery** opens the cycle with a brief orientation. The task specification declares which files are involved and where they reside, so a manual directory sweep is unnecessary. Glance through the listed entries to discern the format mix before advancing to individual workup. If a cited file cannot be located at the expected path, scan the directory for close name variants before concluding it is absent.
 
 **Probing** applies diagnostic scrutiny to each file identified during discovery. Consult the Pre-Inspection Reconnaissance section to determine the appropriate handling pathway for every entry—files that match a recognized format proceed directly to the corresponding pre-built routine, while those requiring preliminary investigation follow the triage sequence outlined there. When the pre-built output leaves questions unanswered or a file's characteristics fall outside the scope of any standard routine, fashion a follow-up probe targeting the specific gap.
 
@@ -87,8 +84,8 @@ The pre-built routine covers all these dimensions:
 
 ```
 execute_script(
-    file_path="<absolute_path>/skills/data-inspection/scripts/inspect_vector.py",
-    args=["dataset/filename.geojson"]
+    file_path="<project_root>/skills/data-inspection/scripts/inspect_vector.py",
+    args=["<project_root>/benchmark_datasets/{source}/filename.geojson"]
 )
 ```
 
@@ -106,8 +103,8 @@ Raster datasets encode continuous spatial phenomena as gridded pixel arrays. Key
 
 ```
 execute_script(
-    file_path="<absolute_path>/skills/data-inspection/scripts/inspect_raster.py",
-    args=["dataset/filename.tif"]
+    file_path="<project_root>/skills/data-inspection/scripts/inspect_raster.py",
+    args=["<project_root>/benchmark_datasets/{source}/filename.tif"]
 )
 ```
 
@@ -123,8 +120,8 @@ Plain tabular files serve as attribute sources, lookup tables, or intermediate p
 
 ```
 execute_script(
-    file_path="<absolute_path>/skills/data-inspection/scripts/inspect_tabular.py",
-    args=["dataset/filename.csv"]
+    file_path="<project_root>/skills/data-inspection/scripts/inspect_tabular.py",
+    args=["<project_root>/benchmark_datasets/{source}/filename.csv"]
 )
 ```
 
@@ -142,7 +139,7 @@ All scripts accept the target file path as a command-line argument and emit stru
 
 ## Custom Probes
 
-When the pre-built routines leave specific questions unanswered, fill the blind spot through a dedicated investigation—either saved to disk for iterative refinement or fed as inline code to `execute_script` for a one-shot sweep. Common scenarios that call for such deeper probing include:
+Where gaps subsist after the initial diagnostic pass, fill the blind spot through a directed investigation—either saved to disk for iterative refinement or fed as inline code to `execute_script` for a one-shot sweep. Common scenarios that call for such deeper probing include:
 
 **Selective field deep-dive.** Extract unique values or frequency distributions for a column suspected of harboring unexpected entries—useful when a join key appears to have inconsistent formatting across two files that should be linkable.
 
@@ -158,7 +155,7 @@ These patterns serve as starting points. Tailor your probes to the specific evid
 
 ## Report Structure and Communication Conduct
 
-Organize your exploration output as a plain text file partitioned by inspected resource. Within each section, foreground the attributes most directly implicated in the task's spatial operations, then follow with supplementary observations such as null distributions and sample previews. Favor terse, scannable layouts over discursive prose; column inventories, projection metadata, and range statistics serve their purpose best when locatable at a glance.
+Organize your exploration output as a plain text file partitioned by inspected resource. Specify the dataset directory's full path at the outset of the report so that file names throughout the passages ahead carry an unambiguous provenance. Within each section, foreground the attributes most directly implicated in the task's spatial operations, then follow with supplementary observations such as null distributions and sample previews. Favor terse, scannable layouts over discursive prose; column inventories, projection metadata, and range statistics serve their purpose best when locatable at a glance.
 
 Your initial dispatch pairs a compact synthesis of the most pivotal discoveries with the on-disk path to the comprehensive record. Resist mirroring the document verbatim; instead, elevate the handful of particulars that bear most directly on the engineer's forthcoming design trajectory—join key nomenclature, reference systems requiring reconciliation, dtype surprises, or schema anomalies warranting cautious handling.
 
