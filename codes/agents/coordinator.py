@@ -42,7 +42,7 @@ class Coordinator:
         self,
         task_id: int,
         api_key: str,
-        task_config: Dict[str, Any],
+        task_info: Dict[str, Any],
         working_dir: Path,
         output_dir: Path,
         interpreter: str,
@@ -50,22 +50,11 @@ class Coordinator:
         check_interval: float = 60.0,
         timeout: float = 900.0,
         process_executor: Optional[ProcessPoolExecutor] = None,
+        layout: Optional[Any] = None,  # BenchmarkLayout 实例
     ):
-        """
-        Args:
-            task_id: 任务编号
-            api_key: DeepSeek API密钥
-            task_config: 任务元数据（prompt、技术栈属性等）
-            working_dir: 任务工作目录
-            output_dir: 输出目录
-            interpreter: Python解释器路径
-            skill_root: 技能目录根路径
-            check_interval: 主控节点检查间隔（秒）
-            timeout: 全局超时阈值（秒）
-        """
         self.task_id = task_id
         self.api_key = api_key
-        self.task_config = task_config
+        self.task_info = task_info
         self.working_dir = working_dir
         self.output_dir = output_dir
         self.interpreter = interpreter
@@ -73,23 +62,19 @@ class Coordinator:
         self.check_interval = check_interval
         self.timeout = timeout
         self._process_executor = process_executor
+        self.layout = layout
 
-        # 脚本的约定落盘路径
         self.script_path = working_dir / "current_script.py"
 
-        # 通信基础设施
         self.channel_registry = ChannelRegistry()
         self._coordinator_channel = self.channel_registry.register("coordinator")
 
-        # 子智能体任务句柄
         self._agent_tasks: Dict[str, asyncio.Task] = {}
 
-        # 状态追踪
         self._start_time: Optional[float] = None
         self._outcome: Optional[Dict[str, Any]] = None
-        self._initial_code_backup: Optional[str] = None  # 延后到首次落盘时赋值
+        self._initial_code_backup: Optional[str] = None
 
-        # 日志
         self._journal = ContextJournal(
             output_dir / "coordinator_journal.json",
             "coordinator",
@@ -189,15 +174,18 @@ class Coordinator:
     def _build_agent_configs(self, skill_registry) -> Dict:
         from .roles import DataExplorer, ScriptEngineer, Diagnostician
 
+        source = self.task_info.get("source", "")
+
         common_kwargs = {
             "api_key": self.api_key,
             "channel_registry": self.channel_registry,
             "skill_registry": skill_registry,
             "working_dir": self.working_dir,
             "temperature": 0.7,
+            "layout": self.layout,
         }
 
-        return {
+        agents = {
             "explorer": DataExplorer(
                 name="explorer",
                 output_dir=self.output_dir / "explorer",
@@ -215,6 +203,11 @@ class Coordinator:
             ),
         }
 
+        for agent in agents.values():
+            agent._task_source = source
+
+        return agents
+
     async def _dispatch_initial_instructions(self):
         """
         向三个子智能体投递启动阶段的情境通报。
@@ -226,7 +219,20 @@ class Coordinator:
         内容严格限于此刻的团队动态和各成员的首要动作，
         不重复角色提示词中的职责描述或技能文档中的方法论。
         """
-        task_description = self.task_config.get("prompt", {}).get("full_text", "")
+        task_description = self.task_info.get("full_text", "")
+
+        # 路径使用指导，附加在每条分发指令末尾
+        path_guidance = ""
+        source = self.task_info.get("source", "")
+        if self.layout and source:
+            dataset_abs = self.layout.dataset_dir(source).resolve()
+            path_guidance = (
+                f"\n\nWhen accessing dataset files, use the absolute path "
+                f"provided in your context ({dataset_abs}) rather than "
+                f"attempting to reconstruct relative paths from directory "
+                f"nesting—relative traversals from the task working directory "
+                f"are error-prone and strongly discouraged."
+            )
 
         await self.channel_registry.deliver(Message(
             msg_type=MessageType.TASK_ASSIGNMENT,
@@ -236,11 +242,12 @@ class Coordinator:
                 "A geospatial analysis task has been assigned to the team. As the "
                 "first member to engage, survey the dataset resources and compile "
                 "an inventory of their schemas, spatial attributes, and quality "
-                "characteristics. The engineer is standing by for your deliverables "
+                "characteristics. The engineer is standing by for your contributions "
                 "and will not begin implementation until your report is in hand. "
                 "Direct your attention toward the dimensions most consequential "
                 "for the operations this task prescribes.\n\n"
                 f"Task specification:\n{task_description}"
+                f"{path_guidance}"
             ),
         ))
 
@@ -250,12 +257,13 @@ class Coordinator:
             recipient="engineer",
             content=(
                 "The team has commenced work on a geospatial analysis task. The "
-                "explorer is currently conducting a comprehensive audit of the "
+                "explorer is currently conducting a meticulous canvass of the "
                 "dataset and will relay the findings once the examination concludes. "
                 "Remain idle until that material reaches you—your design and coding "
                 "effort should proceed only after you have internalized the data "
                 "landscape and clarified any residual uncertainties with the explorer.\n\n"
                 f"Task specification:\n{task_description}"
+                f"{path_guidance}"
             ),
         ))
 
@@ -271,43 +279,27 @@ class Coordinator:
                 "source artifact has been deposited at the agreed-upon location. "
                 "Suspend activity until that notification arrives.\n\n"
                 f"Task specification:\n{task_description}"
+                f"{path_guidance}"
             ),
         ))
 
     async def _supervision_loop(self) -> Dict[str, Any]:
-        """
-        周期性检查团队状态的监控循环。
-
-        每个周期中：
-        1. 消费主控节点收件箱中的消息
-        2. 检查子任务存活状态
-        3. 判定是否达成成功条件或触及超时
-        4. 未达终态则继续等待
-        """
         while True:
             elapsed = time.time() - self._start_time
 
-            # 超时强制终止
             if elapsed >= self.timeout:
                 return await self._force_termination()
 
-            # 消费收件箱
-            msg = await self._coordinator_channel.receive(
-                timeout=self.check_interval
-            )
+            msg = await self._coordinator_channel.receive(timeout=30.0)
 
             if msg is not None:
                 result = self._process_coordinator_message(msg)
                 if result is not None:
                     return result
 
-            # 主动巡检子任务健康状态
             crash_result = self._check_agent_health()
             if crash_result is not None:
                 return crash_result
-
-            if msg is None and elapsed > self.check_interval:
-                await self._probe_team_status()
 
     def _check_agent_health(self) -> Optional[Dict[str, Any]]:
         """
@@ -404,14 +396,16 @@ class Coordinator:
                 sender="coordinator",
                 recipient="diagnostician",
                 content=(
-                    "Time budget exhausted. Submit your current assessment of the "
-                    "script's status via TASK_COMPLETE, including a confidence score "
-                    "(0.0-1.0) in the payload reflecting how thoroughly your findings "
-                    "have been validated."
+                    "Time budget exhausted. If you have applied a patch that has not "
+                    "yet been verified through re-execution, perform one final traced "
+                    "run before submitting. Then deliver your current assessment via "
+                    "TASK_COMPLETE, attaching a confidence score (0.0-1.0) in the "
+                    "payload that reflects how rigorously your conclusions have been "
+                    "corroborated."
                 ),
             ))
 
-            msg = await self._coordinator_channel.receive(timeout=30.0)
+            msg = await self._coordinator_channel.receive(timeout=60.0)
             if msg and msg.msg_type == MessageType.TASK_COMPLETE:
                 return self._process_coordinator_message(msg)
         except (KeyError, Exception):
