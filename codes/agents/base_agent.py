@@ -45,6 +45,7 @@ class BaseAgent:
         output_dir: Path,
         temperature: float = 0.7,
         context_threshold: int = 50000,
+        layout: Optional[Any] = None,
     ):
         self.name = name
         self.api_key = api_key
@@ -65,6 +66,9 @@ class BaseAgent:
 
         self._debug_session_count = 0
         self._reasoning_archive_count = 0
+
+        self.layout = layout
+        self._task_source = ""
 
     async def run(self):
         """智能体主入口。"""
@@ -114,7 +118,14 @@ class BaseAgent:
 
                     for tc in tool_calls:
                         tool_name = tc["function"]["name"]
-                        arguments = json.loads(tc["function"]["arguments"])
+                        try:
+                            arguments = json.loads(tc["function"]["arguments"])
+                        except json.JSONDecodeError as e:
+                            self.context.append_tool_result(
+                                tool_call_id=tc["id"],
+                                content=f"Failed to parse tool arguments: {e}",
+                            )
+                            continue
 
                         result = await self.dispatcher.execute(tool_name, arguments)
 
@@ -200,11 +211,28 @@ class BaseAgent:
     def _assemble_system_prompt(self, role_identity: str, role_workflow: str) -> str:
         skills_overview = self.skill_registry.list_descriptions()
 
+        # 从 task_info 获取数据集定位信息（通过 coordinator 传入）
+        source_hint = ""
+        if self.layout and self._task_source:
+            dataset_abs = self.layout.dataset_dir(self._task_source).resolve()
+            source_hint = (
+                f" In concrete terms, the current engagement operates from "
+                f"{self.working_dir.resolve()}, while the data files are situated at "
+                f"{dataset_abs}."
+            )
+
         return (
             "## Working Environment\n\n"
-            "Each task occupies an isolated directory under the evaluation workspace. "
-            "The dataset/ subdirectory houses source data files; outputs/ collects "
-            "execution artifacts and diagnostic records, partitioned by team member.\n\n"
+            "The evaluation workspace assigns each task its own directory, "
+            "following a {source}/{task_ID}/ hierarchy below the workspace "
+            "root. This directory underpins all file operations and contains an "
+            "outputs/ tree where per-member execution logs and analytical "
+            "byproducts collect over the course of the session.\n\n"
+            "Source data lives in a separate repository beyond the task perimeter, "
+            "reachable at benchmark_datasets/{source}/ from the project base. "
+            "The task description enumerates the data files this assignment "
+            "may draw on and names the collection they stem from."
+            f"{source_hint}\n\n"
 
             "## Team Composition\n\n"
             "Four members collaborate on each geospatial analysis task. "
@@ -238,7 +266,7 @@ class BaseAgent:
             "When a file's content has not changed since your last read, the "
             "tool returns a brief confirmation rather than the full text again, "
             "conserving context space.\n\n"
-            "Direct reading of files under the dataset/ directory is restricted. "
+            "Direct reading of files under the dataset repository is restricted. "
             "Source data files are often too voluminous for context and require "
             "format-aware inspection. Access their content through the explorer's "
             "diagnostic scripts or purpose-built probes instead.\n\n"
@@ -248,6 +276,10 @@ class BaseAgent:
             "sustain its capacity over extended work sessions:\n"
             "- Prefer targeted line-range reads over full-file reads when you "
             "only need a specific section. Use grep to pinpoint locations first.\n"
+            "- Recall that the content you supply to write_file and edit_file is "
+            "already visible in your tool call history—re-reading a file you have "
+            "just authored or modified seldom elicits additional clarity and "
+            "depletes context budget that could serve later investigation.\n"
             "- Conclude debug sessions promptly after extracting your findings. "
             "The interaction transcript is archived to disk automatically; "
             "lingering sessions consume space without contributing fresh insight.\n"
@@ -373,11 +405,11 @@ class BaseAgent:
             ToolSpec(
                 name="read_file",
                 description=(
-                    "Read a file's content. Supports full reads and targeted line-range "
-                    "reads via offset and limit parameters. When the content is unchanged "
-                    "since your last read of the same file, returns a brief confirmation "
-                    "instead of the full text. Large files that exceed the size limit "
-                    "must be read in segments."
+                    "Read a file's content. Supports full reads, targeted line-range "
+                    "reads via offset and limit parameters, and tail reads that retrieve "
+                    "the last N lines. When the content is unchanged since your last read "
+                    "of the same file, returns a brief confirmation instead of the full "
+                    "text. Large files that exceed the size limit must be read in segments."
                 ),
                 parameters={
                     "type": "object",
@@ -393,6 +425,10 @@ class BaseAgent:
                         "limit": {
                             "type": "integer",
                             "description": "Maximum number of lines to read from the offset. Omit to read to the end.",
+                        },
+                        "tail": {
+                            "type": "integer",
+                            "description": "Read the last N lines of the file. Mutually exclusive with offset.",
                         },
                     },
                     "required": ["file_path"],
@@ -412,11 +448,17 @@ class BaseAgent:
                     "properties": {
                         "pattern": {
                             "type": "string",
-                            "description": "Search pattern (regex by default, literal with fixed_strings=true).",
+                            "description": (
+                                "In normal mode, a regex pattern to match against file contents. "
+                                "In --files mode (list_files=true), a glob filter applied to file "
+                                "names—use shell wildcards like *.py or data_*.csv rather than "
+                                "regex syntax. Regex metacharacters such as .*, \\., or $ have "
+                                "no special meaning in glob mode and will cause silent mismatches."
+                            ),
                         },
                         "path": {
                             "type": "string",
-                            "description": "Directory or file to search. Defaults to working directory.",
+                            "description": "Directory or file to search. Accepts both absolute paths and paths relative to the working directory.",
                             "default": ".",
                         },
                         "glob": {
@@ -445,7 +487,11 @@ class BaseAgent:
                         },
                         "list_files": {
                             "type": "boolean",
-                            "description": "List matching file paths only (--files mode). Pattern is used as glob filter.",
+                            "description": (
+                                "List file paths matching the glob pattern instead of searching "
+                                "file contents. When enabled, the pattern parameter is interpreted "
+                                "as a glob filter (e.g. *.geojson), not a regex."
+                            ),
                             "default": False,
                         },
                     },
@@ -524,23 +570,36 @@ class BaseAgent:
         return {"success": True, "result": "Entering idle state. Will resume when a message arrives."}
 
     async def _handle_read_file(
-        self, file_path: str, offset: int = None, limit: int = None
+        self, file_path: str, offset: int = None, limit: int = None, tail: int = None
     ) -> Dict[str, Any]:
         path = Path(file_path)
         if not path.is_absolute():
             path = self.working_dir / path
 
-        # dataset/目录读取管控
-        dataset_dir = (self.working_dir / "dataset").resolve()
+        # 数据集仓库读取管控
         resolved = path.resolve()
-        if resolved.is_relative_to(dataset_dir):
+        if self.layout:
+            dataset_root = self.layout.dataset_root.resolve()
+            if resolved.is_relative_to(dataset_root):
+                return {
+                    "success": False,
+                    "result": (
+                        "This path points into the dataset repository. Files housed "
+                        "there tend to be too unwieldy and format-dependent to ingest "
+                        "raw into context. Channel your data questions to the explorer, "
+                        "whose diagnostic scripts can extract the structural attributes "
+                        "you need from the original source."
+                    ),
+                }
+
+        # journal文件读取管控
+        if resolved.name.endswith("_journal.json"):
             return {
                 "success": False,
                 "result": (
-                    "Direct reading of dataset files is restricted. "
-                    "Source data files are often too large for context and require "
-                    "format-aware inspection. Use the explorer's diagnostic scripts "
-                    "or write a custom probe to extract the specific information you need."
+                    "Journal files are internal framework records and not "
+                    "intended for agent consumption. Focus on the working "
+                    "artifacts within your teammates' output directories."
                 ),
             }
 
@@ -575,14 +634,17 @@ class BaseAgent:
             total_lines = len(all_lines)
 
             # 应用行范围
-            if offset is not None:
-                start = max(0, offset - 1)  # 转为0-based
+            if tail is not None:
+                start = max(0, total_lines - tail)
+                end = total_lines
+            elif offset is not None:
+                start = max(0, offset - 1)
             else:
                 start = 0
 
-            if limit is not None:
+            if tail is None and limit is not None:
                 end = min(start + limit, total_lines)
-            else:
+            elif tail is None:
                 end = total_lines
 
             selected = all_lines[start:end]
@@ -779,6 +841,16 @@ class BaseAgent:
 
         self.context.strip_all_reasoning()
         self.context.inject_reasoning_summary(summary, str(archive_path))
+
+        # 推理链压缩后若占用仍偏高，启动工具结果瘦身
+        if self.context.estimate_token_count() > int(self.context_threshold * 0.8):
+            shrunk = self.context.shrink_stale_tool_results()
+            if shrunk > 0:
+                self.context.append_user(
+                    f"[Context maintenance: {shrunk} earlier tool result(s) "
+                    f"archived to conserve working space. Re-read files as "
+                    f"needed.]"
+                )
 
         return f"Compressed {len(reasoning_contents)} reasoning blocks. Archive: {archive_path}"
 
