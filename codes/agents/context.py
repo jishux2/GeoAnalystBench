@@ -22,6 +22,13 @@ class AgentContext:
 
     TAG_SKILL = "skill:"
 
+    # 工具结果瘦身的目标工具名
+    SHRINKABLE_TOOLS = {"read_file", "grep"}
+    # 早期结果的字符数阈值，超过此值才考虑替换
+    SHRINK_CHAR_THRESHOLD = 2000
+    # 保护最近N条assistant消息对应的工具结果不被瘦身
+    SHRINK_PROTECT_RECENT = 6
+
     def __init__(self, system_prompt: str, agent_name: str):
         self.agent_name = agent_name
         self._messages: List[Dict[str, Any]] = [
@@ -179,6 +186,63 @@ class AgentContext:
             f"</reasoning-summary>\n\n"
             f"Full reasoning archive: {archive_path}"
         )
+
+    def shrink_stale_tool_results(self) -> int:
+        """
+        将早期的大体积读取/检索结果替换为精简的归档指引。
+
+        仅针对 read_file 和 grep 的返回结果，且跳过最近
+        若干轮交互中产出的结果以保护当前决策链路。
+
+        Returns:
+            被替换的工具结果条数
+        """
+        # 收集所有工具调用的ID与其来源工具名的映射
+        tool_call_origins = {}
+        for msg in self._messages:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls", []):
+                    func_name = tc.get("function", {}).get("name", "")
+                    tool_call_origins[tc["id"]] = func_name
+
+        # 定位最近N条assistant消息的工具调用ID，这些受保护
+        protected_ids = set()
+        assistant_count = 0
+        for msg in reversed(self._messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                assistant_count += 1
+                if assistant_count <= self.SHRINK_PROTECT_RECENT:
+                    for tc in msg["tool_calls"]:
+                        protected_ids.add(tc["id"])
+                else:
+                    break
+
+        # 遍历工具结果，替换符合条件的早期大体积结果
+        shrunk_count = 0
+        for msg in self._messages:
+            if msg.get("role") != "tool":
+                continue
+
+            call_id = msg.get("tool_call_id", "")
+            if call_id in protected_ids:
+                continue
+
+            origin = tool_call_origins.get(call_id, "")
+            if origin not in self.SHRINKABLE_TOOLS:
+                continue
+
+            content = msg.get("content", "")
+            if len(content) <= self.SHRINK_CHAR_THRESHOLD:
+                continue
+
+            # 替换为精简指引
+            msg["content"] = (
+                f"[Archived: {origin} result, {len(content):,} chars. "
+                f"Content available on disk—use {origin} to retrieve if needed.]"
+            )
+            shrunk_count += 1
+
+        return shrunk_count
 
     def estimate_token_count(self) -> int:
         """粗略估算当前消息序列的token总量。"""
