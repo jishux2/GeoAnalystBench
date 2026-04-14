@@ -35,6 +35,7 @@ def _run_command_sync(
     timeout: int = 120
 ) -> Dict[str, Any]:
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
     try:
         result = subprocess.run(
             command,
@@ -43,6 +44,7 @@ def _run_command_sync(
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             timeout=timeout
         )
         return {
@@ -50,11 +52,11 @@ def _run_command_sync(
             "stdout": result.stdout,
             "stderr": result.stderr
         }
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         return {
             "returncode": -1,
-            "stdout": "",
-            "stderr": f"Execution timed out (>{timeout}s)"
+            "stdout": e.stdout or "",
+            "stderr": f"Execution timed out (>{timeout}s)\n{e.stderr or ''}".strip(),
         }
     except Exception as e:
         return {
@@ -294,14 +296,14 @@ class ScriptExecutor:
                 command,
                 str(self.working_dir),
                 env,
-                300,
+                120,
             )
         else:
             result = _run_command_sync(
                 command,
                 str(self.working_dir),
                 env,
-                300,
+                120,
             )
 
         # 持久化输出流
@@ -321,17 +323,24 @@ class ScriptExecutor:
             if stderr_tail:
                 summary_parts.append(f"Stderr (last lines):\n" + "\n".join(stderr_tail))
 
-        # 检查诊断文件
-        trace_file = run_output_dir / "error_trace.json"
-        if trace_file.exists():
-            summary_parts.append(
-                f"Error trace: {relative_output}/error_trace.json"
-            )
+            trace_file = run_output_dir / "error_trace.json"
+            if trace_file.exists():
+                summary_parts.append(
+                    f"Error trace captured: {relative_output}/error_trace.json"
+                )
+            else:
+                summary_parts.append(
+                    "No structured error trace was generated for this failure."
+                )
 
         call_file = run_output_dir / "call_details.json"
         if call_file.exists():
             summary_parts.append(
-                f"Call details: {relative_output}/call_details.json"
+                f"Monitored call failures logged: {relative_output}/call_details.json"
+            )
+        elif not success:
+            summary_parts.append(
+                "No monitored call failures were recorded."
             )
 
         return {
