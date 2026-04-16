@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from benchmark.task_index import TaskIndex
 from benchmark.workspace_setup import BenchmarkLayout
+
+
+EVAL_DIMENSIONS = [
+    "task_alignment", "execution_validity", "output_completeness",
+    "result_fidelity", "visualization_quality", "code_craftsmanship",
+]
 
 
 def export(output_path: str = "dashboard_data.json"):
@@ -77,8 +84,12 @@ def export(output_path: str = "dashboard_data.json"):
         else:
             record["eval_status"] = "pending"
 
-        # 评估分数
+        # 评估分数、维度详情、评语与时间戳
         record["eval_score"] = None
+        record["eval_dimensions"] = {}
+        record["eval_rationales"] = {}
+        record["eval_completed_at"] = None
+
         if eval_result_path.exists():
             try:
                 with open(eval_result_path, "r", encoding="utf-8") as f:
@@ -86,11 +97,13 @@ def export(output_path: str = "dashboard_data.json"):
                 if not eval_result.get("parse_error"):
                     record["eval_score"] = eval_result.get("overall_score")
                     record["eval_status"] = "completed"
-                    record["eval_dimensions"] = {}
-                    for dim in ["task_alignment", "execution_validity", "output_completeness",
-                                "result_fidelity", "visualization_quality", "code_craftsmanship"]:
+                    record["eval_summary"] = eval_result.get("summary", "")
+                    for dim in EVAL_DIMENSIONS:
                         if dim in eval_result and isinstance(eval_result[dim], dict):
                             record["eval_dimensions"][dim] = eval_result[dim].get("score")
+                            record["eval_rationales"][dim] = eval_result[dim].get("rationale", "")
+                    # 文件修改时间作为评估完成的时序依据
+                    record["eval_completed_at"] = os.path.getmtime(str(eval_result_path))
             except (json.JSONDecodeError, KeyError):
                 pass
 
