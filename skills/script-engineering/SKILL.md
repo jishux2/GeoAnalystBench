@@ -82,6 +82,13 @@ os.makedirs(output_dir, exist_ok=True)
 
 Throwaway files that serve only the script's internal logic—intermediate rasters, temporary joins—should stay in the working directory proper, not in `pred_results/`.
 
+**Text encoding.** The execution host does not assume UTF-8 as its native codec, so every text-mode `open()` call must be pinned to `encoding="utf-8"` to forestall mid-write codec errors—f-strings that inline unit symbols like `km²` or `°C` are especially vulnerable when the platform's narrower repertoire encounters characters it cannot map.
+
+```python
+with open(os.path.join(output_dir, "summary.txt"), "w", encoding="utf-8") as f:
+    f.write(f"Mean density: {value:.2f} persons/km²\n")
+```
+
 **Function monitoring setup.** The runtime harness optionally injects a `monitor_call` decorator that captures argument snapshots and exception context for wrapped library calls. Your script must remain executable in environments where this injection has not occurred. Place a defensive fallback near the top, before any wrapper registrations:
 
 ```python
