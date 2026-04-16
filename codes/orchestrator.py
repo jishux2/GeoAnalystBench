@@ -51,6 +51,45 @@ class AgentOrchestrator(BatchRunner):
         self._process_executor = process_executor
         self.enable_evaluation = enable_evaluation
 
+    def _check_dataset_availability(self, task_info: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        验证任务声明的数据文件是否存在于对应来源的数据集目录下。
+
+        Returns:
+            all_present: 全部文件就位时为 True
+            missing: 缺失文件名列表
+            summary: 供初始消息嵌入的文本概述
+        """
+        source = task_info.get("source", "")
+        files = task_info.get("dataset_files", [])
+
+        if not files:
+            return {"all_present": True, "missing": [], "summary": ""}
+
+        dataset_dir = self.layout.dataset_dir(source)
+        missing = []
+
+        for filename in files:
+            if not (dataset_dir / filename).exists():
+                missing.append(filename)
+
+        if not missing:
+            return {"all_present": True, "missing": [], "summary": ""}
+
+        summary = (
+            f"Pre-launch verification flagged {len(missing)} unreachable data file(s) "
+            f"among the {len(files)} declared for this task: {', '.join(missing)}. "
+            f"None of these entries were found under {dataset_dir}. Determine "
+            f"whether the remaining resources accommodate the stipulated analysis "
+            f"or whether the shortfall renders the task infeasible."
+        )
+
+        return {
+            "all_present": False,
+            "missing": missing,
+            "summary": summary,
+        }
+
     async def _execute_single(
         self, task_id: str, entry: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -65,6 +104,9 @@ class AgentOrchestrator(BatchRunner):
 
         print(f"  [{source}/{task_id}] launching agent team...")
 
+        task_info = self.index.extract_task_info(task_id)
+        dataset_check = self._check_dataset_availability(task_info)
+
         coordinator = Coordinator(
             task_id=task_id,
             api_key=self.api_key,
@@ -77,6 +119,7 @@ class AgentOrchestrator(BatchRunner):
             timeout=self.task_timeout,
             process_executor=self._process_executor,
             layout=self.layout,
+            dataset_check=dataset_check,
         )
 
         result = await coordinator.run()
