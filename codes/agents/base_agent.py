@@ -35,6 +35,13 @@ class BaseAgent:
     READ_RESULT_TOKEN_BUDGET = 25000        # 读取结果的token预算（字符数/4估算）
     READ_RESULT_CHAR_BUDGET = 100000        # 对应的字符数预算
 
+    # 主控节点接受的消息类型白名单
+    _COORDINATOR_ACCEPTED_TYPES = {
+        MessageType.TASK_REPORT,
+        MessageType.TASK_COMPLETE,
+        MessageType.STATUS_REPLY,
+    }
+
     def __init__(
         self,
         name: str,
@@ -554,8 +561,28 @@ class BaseAgent:
         payload=None,
     ) -> Dict[str, Any]:
         try:
+            resolved_type = MessageType(msg_type)
+        except ValueError:
+            return {"success": False, "result": f"Unknown message type: {msg_type}"}
+
+        if to == "coordinator" and resolved_type not in self._COORDINATOR_ACCEPTED_TYPES:
+            return {
+                "success": False,
+                "result": (
+                    f"The coordinator is a rule-driven overseer that neither "
+                    f"fields inquiries nor acts on requests—it exclusively "
+                    f"recognizes delivery confirmations (task_report), resolution "
+                    f"declarations (task_complete), and progress summaries "
+                    f"(status_reply). A '{msg_type}' message falls outside that "
+                    f"reception scope. Refer the matter to the teammate whose "
+                    f"competence covers it: the explorer for dataset-level "
+                    f"concerns, the diagnostician for runtime and code issues."
+                ),
+            }
+
+        try:
             msg = Message(
-                msg_type=MessageType(msg_type),
+                msg_type=resolved_type,
                 sender=self.name,
                 recipient=to,
                 content=content,
