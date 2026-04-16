@@ -127,6 +127,16 @@ def build_data_inspection_tools(
                         "description": "Command-line arguments forwarded to the script.",
                         "default": [],
                     },
+                    "timeout": {
+                        "type": "integer",
+                        "description": (
+                            "Upper bound in seconds for the execution to finish. "
+                            "Defaults to 120 when omitted. Raise for scripts that "
+                            "process voluminous datasets or perform computationally "
+                            "intensive spatial operations; lower for routines expected "
+                            "to complete swiftly so that stalls become apparent sooner."
+                        ),
+                    },
                 },
                 "required": [],
             },
@@ -299,13 +309,24 @@ def build_code_diagnosis_tools(
                         "description": "Command-line arguments forwarded to the script.",
                         "default": [],
                     },
+                    "timeout": {
+                        "type": "integer",
+                        "description": (
+                            "Ceiling in seconds before the process is terminated. "
+                            "Falls back to 120 when unspecified. Extend when "
+                            "re-running scripts whose earlier attempts were cut "
+                            "short by the standard limit; tighten for brief "
+                            "exploratory checks where a rapid timeout exposes "
+                            "an unforeseen hang."
+                        ),
+                    },
                 },
                 "required": [],
             },
-            handler=lambda file_path=None, code=None, with_tracing=False, args=None, **kwargs: (
-                script_executor.handle_execute_code(code, with_tracing=with_tracing)
+            handler=lambda file_path=None, code=None, with_tracing=False, args=None, timeout=None, **kwargs: (
+                script_executor.handle_execute_code(code, timeout=timeout)
                 if code else
-                script_executor.handle_execute_script(file_path, with_tracing=with_tracing, args=args)
+                script_executor.handle_execute_script(file_path, with_tracing=with_tracing, args=args, timeout=timeout)
             ),
         ),
         ToolSpec(

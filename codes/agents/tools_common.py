@@ -226,6 +226,10 @@ class ScriptExecutor:
     输出流持久化到磁盘，上下文中仅返回路径指针。
     """
 
+    # 超时参数的归整方法
+    DEFAULT_TIMEOUT = 120
+    MAX_TIMEOUT = 600
+
     def __init__(
         self,
         interpreter: str,
@@ -244,6 +248,7 @@ class ScriptExecutor:
         file_path: str,
         with_tracing: bool = False,
         args: Optional[List[str]] = None,
+        timeout: int = None,
     ) -> Dict[str, Any]:
         """
         执行指定的Python脚本。
@@ -252,7 +257,10 @@ class ScriptExecutor:
             file_path: 脚本文件路径（相对于工作目录或绝对路径）
             with_tracing: 是否注入异常追踪钩子和函数监控装饰器
             args: 传递给脚本的命令行参数列表
+            timeout: 执行超时秒数，不指定时使用默认值120秒
         """
+        effective_timeout = self._clamp_timeout(timeout)
+
         self._execution_count += 1
         run_label = f"run_{self._execution_count}"
 
@@ -296,14 +304,14 @@ class ScriptExecutor:
                 command,
                 str(self.working_dir),
                 env,
-                120,
+                effective_timeout,
             )
         else:
             result = _run_command_sync(
                 command,
                 str(self.working_dir),
                 env,
-                120,
+                effective_timeout,
             )
 
         # 持久化输出流
@@ -318,29 +326,28 @@ class ScriptExecutor:
         summary_parts.append(f"Output directory: {relative_output}")
 
         if not success:
-            # 失败时在摘要中包含stderr的尾部片段辅助快速定位
             stderr_tail = result["stderr"].strip().split("\n")[-10:]
             if stderr_tail:
                 summary_parts.append(f"Stderr (last lines):\n" + "\n".join(stderr_tail))
 
-            trace_file = run_output_dir / "error_trace.json"
-            if trace_file.exists():
-                summary_parts.append(
-                    f"Error trace captured: {relative_output}/error_trace.json"
-                )
-            else:
-                summary_parts.append(
-                    "No structured error trace was generated for this failure."
-                )
+        trace_file = run_output_dir / "error_trace.json"
+        if trace_file.exists():
+            summary_parts.append(
+                f"Error trace captured: {relative_output}/error_trace.json"
+            )
+        else:
+            summary_parts.append(
+                "No structured error trace was generated for this execution."
+            )
 
         call_file = run_output_dir / "call_details.json"
         if call_file.exists():
             summary_parts.append(
                 f"Monitored call failures logged: {relative_output}/call_details.json"
             )
-        elif not success:
+        else:
             summary_parts.append(
-                "No monitored call failures were recorded."
+                "No monitored call failures were recorded in this session."
             )
 
         return {
@@ -352,7 +359,7 @@ class ScriptExecutor:
     async def handle_execute_code(
         self,
         code: str,
-        with_tracing: bool = False,
+        timeout: int = None,
     ) -> Dict[str, Any]:
         """
         执行传入的Python代码字符串并直接返回输出。
@@ -360,25 +367,18 @@ class ScriptExecutor:
         代码写入系统临时文件执行，不纳入任务归档结构。
         stdout直接作为结果返回，适用于轻量级验证场景。
         """
-        import tempfile
-        import os
+        effective_timeout = self._clamp_timeout(timeout)
 
         try:
-            # 写入系统临时目录
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".py", delete=False, encoding="utf-8"
             ) as f:
-                if with_tracing:
-                    f.write(self._inject_tracing(code))
-                else:
-                    f.write(code)
+                f.write(code)
                 temp_path = f.name
 
-            # 构造执行命令
             command = [self.interpreter, temp_path]
             env = os.environ.copy()
 
-            # 执行
             if self.executor:
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(
@@ -387,23 +387,21 @@ class ScriptExecutor:
                     command,
                     str(self.working_dir),
                     env,
-                    120,
+                    effective_timeout,
                 )
             else:
                 result = _run_command_sync(
                     command,
                     str(self.working_dir),
                     env,
-                    120,
+                    effective_timeout,
                 )
 
-            # 清理临时文件
             try:
                 os.unlink(temp_path)
             except OSError:
                 pass
 
-            # 组装返回结果
             success = result["returncode"] == 0
             parts = []
 
@@ -423,6 +421,12 @@ class ScriptExecutor:
 
         except Exception as e:
             return {"success": False, "result": f"Inline execution failed: {e}"}
+
+    def _clamp_timeout(self, requested: Optional[int]) -> int:
+        """将调用方指定的超时值约束在合理区间内。"""
+        if requested is None:
+            return self.DEFAULT_TIMEOUT
+        return max(10, min(int(requested), self.MAX_TIMEOUT))
 
     def _inject_tracing(self, code: str) -> str:
         """注入异常追踪钩子和函数监控装饰器。"""
