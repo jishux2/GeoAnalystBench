@@ -741,11 +741,15 @@ class BaseAgent:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 cwd=str(self.working_dir),
             )
 
-            output = result.stdout.strip()
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
+            output = stdout.strip()
+
             if result.returncode == 0:
                 if not output:
                     return {"success": True, "result": "No matches found."}
@@ -753,7 +757,7 @@ class BaseAgent:
             elif result.returncode == 1:
                 return {"success": True, "result": "No matches found."}
             else:
-                error = result.stderr.strip()
+                error = stderr.strip()
                 return {"success": False, "result": f"grep failed: {error}"}
         except FileNotFoundError:
             return {
