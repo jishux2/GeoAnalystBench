@@ -51,6 +51,7 @@ class Coordinator:
         timeout: float = 900.0,
         process_executor: Optional[ProcessPoolExecutor] = None,
         layout: Optional[Any] = None,  # BenchmarkLayout 实例
+        dataset_check: Optional[Dict[str, Any]] = None,
     ):
         self.task_id = task_id
         self.api_key = api_key
@@ -79,6 +80,8 @@ class Coordinator:
             output_dir / "coordinator_journal.json",
             "coordinator",
         )
+
+        self._dataset_check = dataset_check or {"all_present": True, "missing": [], "summary": ""}
 
     async def run(self) -> Dict[str, Any]:
         """
@@ -234,6 +237,12 @@ class Coordinator:
                 f"are error-prone and strongly discouraged."
             )
 
+        dataset_warning = ""
+        if not self._dataset_check["all_present"]:
+            dataset_warning = (
+                f"\n\n⚠ Data availability notice: {self._dataset_check['summary']}"
+            )
+
         await self.channel_registry.deliver(Message(
             msg_type=MessageType.TASK_ASSIGNMENT,
             sender="coordinator",
@@ -248,6 +257,7 @@ class Coordinator:
                 "for the operations this task prescribes.\n\n"
                 f"Task specification:\n{task_description}"
                 f"{path_guidance}"
+                f"{dataset_warning}"
             ),
         ))
 
@@ -334,6 +344,19 @@ class Coordinator:
                 "terminated_by": "agent_crash",
             }
 
+        # 探查员上报数据不可行
+        if (
+            msg.msg_type == MessageType.TASK_REPORT
+            and msg.payload.get("task_infeasible")
+        ):
+            return {
+                "success": False,
+                "error": msg.content,
+                "patches": [],
+                "terminated_by": "data_infeasible",
+                "infeasibility_reason": msg.payload.get("reason", msg.content),
+            }
+
         if (
             msg.msg_type == MessageType.TASK_REPORT
             and msg.sender == "engineer"
@@ -399,13 +422,13 @@ class Coordinator:
                     "Time budget exhausted. If you have applied a patch that has not "
                     "yet been verified through re-execution, perform one final traced "
                     "run before submitting. Then deliver your current assessment via "
-                    "TASK_COMPLETE, attaching a confidence score (0.0-1.0) in the "
+                    "task_complete, attaching a confidence score (0.0-1.0) in the "
                     "payload that reflects how rigorously your conclusions have been "
                     "corroborated."
                 ),
             ))
 
-            msg = await self._coordinator_channel.receive(timeout=60.0)
+            msg = await self._coordinator_channel.receive(timeout=120.0)
             if msg and msg.msg_type == MessageType.TASK_COMPLETE:
                 return self._process_coordinator_message(msg)
         except (KeyError, Exception):
